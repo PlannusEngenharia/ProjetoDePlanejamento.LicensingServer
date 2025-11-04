@@ -1,5 +1,5 @@
 // Program.cs
-
+using Microsoft.AspNetCore.Mvc;
 using ProjetoDePlanejamento.LicensingServer;
 using ProjetoDePlanejamento.LicensingServer.Contracts;
 using System.Collections.Concurrent;
@@ -10,7 +10,6 @@ using System.Text.Json;
 var builder = WebApplication.CreateBuilder(args);
 
 // ===== Porta para Railway =====
-// Railway injeta a variável PORT. Em dev/local você pode usar 7019.
 var port = Environment.GetEnvironmentVariable("PORT") ?? "7019";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
@@ -32,7 +31,34 @@ var app = builder.Build();
 app.UseCors();
 
 // ===== Private Key (preferir ENV no Railway) =====
-const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY----- MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM wXJ3GVOpG75OeF0zv6iwYAYK7HMlMpHARhrl/K7xAh5p1r1zrR1R83AxLUAPWvTE YrchFqCUvOqcu9d6dQ905+uJpn6Ej7FP39edaX7rvjv90dNS0/NnBil6nbcc4xL0 Si2wGhU/GCVYtmZCylhkjCvg1sHo68so+yUU75lj5E764Ev1X0TweWMVB2bPRdzR mVzkZzoo0n5bFkAVom61GmU2mfFwzGkri7FkPIVKLgHGS3ggYA04Ao0MSdHqvQW+ Oc5YH//1rCy8ADBmyJ6FQIFTxQ0k/PPnqfCBZqfrOUQQGY8p3tIJNO9XcKiG3h01 uPGjk/ErAgMBAAECggEAQKqrbWoOeRsGuM10/J7z68sBEtdaZwCZRhSCqOZNPc6Y 5ZqWxsenZxD1cW3AhM5xPSvoG49i0OMCkkcoQSIN+xMcw/w4GQOQeAnnO0MDNLX+ aMstYzR8eqX1TZqpDFC1YKV7AnSerNSSvZ+RXgubvkGt29Nl36TZt8xrzG3DcM5/ aifxlRH82P1DO/wuPlTzFaOWmyWLSHRDNnxhkjQWeAm4+H9n1BIUb1l+0PVKhfP2 9Kb74/kUvupCPHolxFZsEoTcvKjb02aY9YZYMJ3CeU6Ltz3ETD6mkgpI4UteqbFt CAQ8zWQDl7IACpWMM9DBVgyB+MtcVKtaDQ5tBReunQKBgQDl77RtEOCVZHKKdbGL TG+FWQOyxolmtzp7y2kq5iovpjLj0uAxBOEsdvWkK6zYASVAL30B1AGo8o11nHKT +8VnoDy+eGxWaZDe1mDQ6pqSGpOYLJDETzrWYH5bfReUduCM5bW6LmyEQBS9OkO/ vws3ctHfUdYPiScZ/SqXVD3ktwKBgQDhubQcKdt+mbDfV/4/G4PINMX1AHwShnqe zlX2rMiJHAlDLFyuXYl8qq/5HwJwhqPo4jerRX0D1o79bLdG6DgavWn0AnCfCQ0W /U/9MIItL6EFZ4w7dDHtY8ac25EwJE80jT02ELyWXOjHLC4J15QJBNFebAHWEkZj hK0REvgrLQKBgQCQlcxEkMpH5mPIAP3lc+jkVvbmYcVgm3LhCSVWXmjEkaOKcr2a 1VCqXxtTYktLgFzmIXZfwepRTEP7YqcBut2ErdPEiYDGTZdVKES02fDcUm3g0JUv fAqpZv/Nk7lSF/ZXYtKFAlAmUQ05d/vGBOGOulqSLKmIF1xJEVLI2aYZvQKBgQCm fOQdibn9TLqqYSqDvXWbq2D+7laVC19R1nqNMK/QgT9LrmLFsPQBYZvdsUOJX6Vx 1biduOkWdaCNxyv/PrRy9JY7hbkvc+uVs0zWQHsjfOfVJqTGDVPt9hO+CiyyR3Ws Gyi0we93MBv5G9rxI3JqnIUYka1hCaWlLWzBFS66GQKBgHPhPk732dh01AH0qtQD dKx7gArB6ieurx3y4wLF9RFIoW6Z87QyIT0iYMKP3un8gp4jrJvW7uC7AbUZsFrM zvu22nwtE+C8cPZZpJAgnWDCRpTRa9aodeOwl/zqJQIz9mPzkoOYTY7vSKvPCSVJ yNc0Sb1dO7dfmIYwz/t0cWy8 -----END PRIVATE KEY-----";
+const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM
+wXJ3GVOpG75OeF0zv6iwYAYK7HMlMpHARhrl/K7xAh5p1r1zrR1R83AxLUAPWvTE
+YrchFqCUvOqcu9d6dQ905+uJpn6Ej7FP39edaX7rvjv90dNS0/NnBil6nbcc4xL0
+Si2wGhU/GCVYtmZCylhkjCvg1sHo68so+yUU75lj5E764Ev1X0TweWMVB2bPRdzR
+mVzkZzoo0n5bFkAVom61GmU2mfFwzGkri7FkPIVKLgHGS3ggYA04Ao0MSdHqvQW+
+Oc5YH//1rCy8ADBmyJ6FQIFTxQ0k/PPnqfCBZqfrOUQQGY8p3tIJNO9XcKiG3h01
+uPGjk/ErAgMBAAECggEAQKqrbWoOeRsGuM10/J7z68sBEtdaZwCZRhSCqOZNPc6Y
+5ZqWxsenZxD1cW3AhM5xPSvoG49i0OMCkkcoQSIN+xMcw/w4GQOQeAnnO0MDNLX+
+aMstYzR8eqX1TZqpDFC1YKV7AnSerNSSvZ+RXgubvkGt29Nl36TZt8xrzG3DcM5/
+aifxlRH82P1DO/wuPlTzFaOWmyWLSHRDNnxhkjQWeAm4+H9n1BIUb1l+0PVKhfP2
+9Kb74/kUvupCPHolxFZsEoTcvKjb02aY9YZYMJ3CeU6Ltz3ETD6mkgpI4UteqbFt
+CAQ8zWQDl7IACpWMM9DBVgyB+MtcVKtaDQ5tBReunQKBgQDl77RtEOCVZHKKdbGL
+TG+FWQOyxolmtzp7y2kq5iovpjLj0uAxBOEsdvWkK6zYASVAL30B1AGo8o11nHKT
++8VnoDy+eGxWaZDe1mDQ6pqSGpOYLJDETzrWYH5bfReUduCM5bW6LmyEQBS9OkO/
+vws3ctHfUdYPiScZ/SqXVD3ktwKBgQDhubQcKdt+mbDfV/4/G4PINMX1AHwShnqe
+zlX2rMiJHAlDLFyuXYl8qq/5HwJwhqPo4jerRX0D1o79bLdG6DgavWn0AnCfCQ0W
+/U/9MIItL6EFZ4w7dDHtY8ac25EwJE80jT02ELyWXOjHLC4J15QJBNFebAHWEkZj
+hK0REvgrLQKBgQCQlcxEkMpH5mPIAP3lc+jkVvbmYcVgm3LhCSVWXmjEkaOKcr2a
+1VCqXxtTYktLgFzmIXZfwepRTEP7YqcBut2ErdPEiYDGTZdVKES02fDcUm3g0JUv
+fAqpZv/Nk7lSF/ZXYtKFAlAmUQ05d/vGBOGOulqSLKmIF1xJEVLI2aYZvQKBgQCm
+fOQdibn9TLqqYSqDvXWbq2D+7laVC19R1nqNMK/QgT9LrmLFsPQBYZvdsUOJX6Vx
+1biduOkWdaCNxyv/PrRy9JY7hbkvc+uVs0zWQHsjfOfVJqTGDVPt9hO+CiyyR3Ws
+Gyi0we93MBv5G9rxI3JqnIUYka1hCaWlLWzBFS66GQKBgHPhPk732dh01AH0qtQD
+dKx7gArB6ieurx3y4wLF9RFIoW6Z87QyIT0iYMKP3un8gp4jrJvW7uC7AbUZsFrM
+zvu22nwtE+C8cPZZpJAgnWDCRpTRa9aodeOwl/zqJQIz9mPzkoOYTY7vSKvPCSVJ
+yNc0Sb1dO7dfmIYwz/t0cWy8
+-----END PRIVATE KEY-----";
 string PrivateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
 
 // ===== Assinatura e JWT RS256 =====
@@ -48,7 +74,6 @@ static string SignPayload(string privatePem, LicensePayload payload)
 // ===== (opcional) controles de throttle =====
 var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
 var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
-
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
 {
     var now = DateTime.UtcNow;
@@ -57,9 +82,12 @@ static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan 
     return false;
 }
 
-// ===== Rotas =====
+// ===== Rotas utilitárias =====
+app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" });
+app.MapGet("/favicon.ico", () => Results.NoContent()); // evita 404 de favicon nos logs
 app.MapGet("/health", () => new { ok = true });
 
+// ===== API de ativação/status =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
     if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
@@ -87,5 +115,109 @@ app.MapPost("/api/status", (StatusRequest req) =>
     return Results.Ok(resp);
 });
 
-// manter ativo
+// ===== WEBHOOK HOTMART (v2.0) =====
+app.MapPost("/webhook/hotmart", async ([FromBody] JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
+{
+    // 1) Verificação do token
+    var expected = Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "";
+    var got =
+        req.Headers["hottok"].FirstOrDefault()
+        ?? req.Headers["HOTTOK"].FirstOrDefault()
+        ?? req.Headers["x-hotmart-hottok"].FirstOrDefault();
+
+    if (string.IsNullOrWhiteSpace(expected) || string.IsNullOrWhiteSpace(got) || !CryptographicEquals(expected, got))
+        return Results.Unauthorized();
+
+    // 2) Leitura resiliente do conteúdo
+    var root = body.RootElement;
+
+    // Tentativas de achar o "evento"
+    string? evt =
+        TryGetString(root, "event") ??
+        TryGetString(root, "event_key") ??
+        TryGetString(root, "status") ??
+        TryGetString(root, "type");
+
+    // E-mail do comprador, caso venha
+    string? email =
+        TryGetString(root, "buyer_email") ??
+        TryGetString(root, "email") ??
+        TryGetString(root, "customer_email") ??
+        TryGetByPath(root, "data.buyer.email") ??
+        TryGetByPath(root, "subscription.customer.email");
+
+    // LicenseKey – seu fluxo pode usar o e-mail, ou uma chave enviada ao app
+    // Aqui, deixamos nulo e só prolongamos por e-mail quando houver.
+    // Caso você queira atrelar a uma key específica, você pode salvar o mapeamento email->key em seu repositório.
+    // string? licenseKey = ...
+
+    // 3) Normaliza o evento para nosso switch
+    var e = (evt ?? "").Trim().ToLowerInvariant();
+
+    // 4) Regras simples: aprovado = renova 30d; reembolsado/expirado/cancelado = -30d
+    TimeSpan delta;
+    bool isRenew =
+        e.Contains("approved") || e.Contains("aprovada") ||
+        e.Contains("purchase_approved") || e.Contains("sale_approved");
+
+    bool isCancel =
+        e.Contains("refund") || e.Contains("reembols") ||
+        e.Contains("expired") || e.Contains("expirad") ||
+        e.Contains("canceled") || e.Contains("cancelamento") ||
+        e.Contains("chargeback");
+
+    if (isRenew)
+        delta = TimeSpan.FromDays(30);
+    else if (isCancel)
+        delta = TimeSpan.FromDays(-30);
+    else
+        delta = TimeSpan.Zero; // eventos que não afetam licença
+
+    // 5) Aplica
+    if (delta != TimeSpan.Zero && !string.IsNullOrWhiteSpace(email))
+    {
+        if (delta > TimeSpan.Zero)
+        {
+            // Se está renovando e for usar key fixa, você poderia chamar IssueOrRenewAsync(key, email, null)
+            // Aqui, como não temos key, vamos usar o atalho por e-mail:
+            await repo.ProlongByEmailAsync(email!, delta);
+        }
+        else
+        {
+            await repo.ProlongByEmailAsync(email!, delta);
+        }
+    }
+
+    // 6) Sempre 200 OK (idempotente). Hotmart só precisa saber que recebemos.
+    return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
+});
+
+// ===== Helpers locais =====
+static bool CryptographicEquals(string a, string b)
+{
+    var ba = Encoding.UTF8.GetBytes(a);
+    var bb = Encoding.UTF8.GetBytes(b);
+    if (ba.Length != bb.Length) return false;
+    int diff = 0;
+    for (int i = 0; i < ba.Length; i++) diff |= ba[i] ^ bb[i];
+    return diff == 0;
+}
+
+static string? TryGetString(JsonElement el, string name)
+    => el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+static string? TryGetByPath(JsonElement el, string path)
+{
+    // ex.: "data.buyer.email"
+    var cur = el;
+    foreach (var seg in path.Split('.'))
+    {
+        if (!cur.TryGetProperty(seg, out var next)) return null;
+        cur = next;
+    }
+    return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
+}
+
+// ===== manter ativo =====
 app.Run();
+
