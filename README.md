@@ -1,0 +1,1 @@
+# ProjetoDePlanejamento.LicensingServer
