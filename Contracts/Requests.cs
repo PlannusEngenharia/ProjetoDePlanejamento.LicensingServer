@@ -1,0 +1,35 @@
+namespace ProjetoDePlanejamento.LicensingServer.Contracts
+{
+    // /api/activate
+    public sealed class ActivateRequest
+    {
+        public string? LicenseKey { get; set; }
+        public string? Email { get; set; }
+        public string? Fingerprint { get; set; }
+    }
+
+    // /api/status (mock compat)
+    public sealed class StatusRequest
+    {
+        public string? LicenseKey { get; set; }
+        public string? AppVersion { get; set; }
+    }
+
+    public sealed class StatusResponse
+    {
+        public DateTime? TrialStartedUtc { get; set; }
+        public DateTime? ExpiresAtUtc { get; set; }
+        public bool IsActive { get; set; }
+        public string? CustomerName { get; set; }
+        public string? CustomerEmail { get; set; }
+        public List<string> Features { get; set; } = new();
+    }
+
+    // Webhook (Hotmart) – mock
+    public sealed class HotmartWebhook
+    {
+        public string? Event { get; set; }
+        public string? LicenseKey { get; set; }
+        public string? BuyerEmail { get; set; }
+    }
+}
