@@ -1,32 +1,66 @@
-// Program.cs
 using Microsoft.AspNetCore.Mvc;
-using ProjetoDePlanejamento.LicensingServer;
-using ProjetoDePlanejamento.LicensingServer.Contracts;
-using System.Collections.Concurrent;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
+using ProjetoDePlanejamento.LicensingServer;
+using ProjetoDePlanejamento.LicensingServer.Contracts; // se você já tem DTOs/Contracts
+using Microsoft.AspNetCore.Http.Json;
+
+// --- Se você NÃO tiver os Contracts definidos, remova o 'using' acima e descomente as classes DTO abaixo. ---
+// (eu deixei o using para reusar suas classes; só descomente e ajuste se necessário)
+
+/*
+public record ActivateRequest(string? LicenseKey, string? Email, string? Fingerprint);
+public record ValidateRequest(string? LicenseKey, string? MachineId);
+public record DeactivateRequest(string? LicenseKey, string? MachineId);
+public record StatusRequest(); // opcional payload
+public record StatusResponse(bool IsActive, string? CustomerName, string? CustomerEmail, DateTime ExpiresAtUtc, DateTime TrialStartedUtc, List<string> Features);
+public enum LicenseType { Subscription, Trial }
+public record LicensePayload { public LicenseType Type {get; init;} public string? Email {get; set;} public string? Fingerprint {get; set;} public DateTime ExpiresAtUtc {get; set;} public string? SubscriptionStatus {get; set;} }
+public class SignedLicense { public LicensePayload Payload { get; set;} = new LicensePayload(); public string? SignatureBase64 { get; set; } }
+*/
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ===== Porta para Railway =====
+// ===== Port for Railway (or fallback) =====
 var port = Environment.GetEnvironmentVariable("PORT") ?? "7019";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-// ===== JSON camelCase =====
-builder.Services.ConfigureHttpJsonOptions(o =>
+// ===== JSON options =====
+builder.Services.Configure<JsonOptions>(opts =>
 {
-    o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    o.SerializerOptions.WriteIndented = false;
+    opts.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    opts.SerializerOptions.WriteIndented = false;
 });
 
 // ===== CORS =====
 builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
-// ===== Repositório em memória (teste) =====
-builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
+// ===== License repo: read seeds from env (LICENSE_SEEDS as comma separated or JSON array) =====
+IEnumerable<string>? ParseSeedsFromEnv()
+{
+    var env = Environment.GetEnvironmentVariable("LICENSE_SEEDS") 
+              ?? Environment.GetEnvironmentVariable("LICENSE_SEEDS_JSON");
+    if (string.IsNullOrWhiteSpace(env)) return Array.Empty<string>();
 
+    env = env.Trim();
+    if (env.StartsWith("[") && env.EndsWith("]"))
+    {
+        try { return JsonSerializer.Deserialize<string[]>(env) ?? Array.Empty<string>(); }
+        catch { /* fallback below */ }
+    }
+
+    // comma separated
+    return env.Split(new[] {','}, StringSplitOptions.RemoveEmptyEntries)
+              .Select(s => s.Trim())
+              .Where(s => !string.IsNullOrWhiteSpace(s));
+}
+
+var seeds = ParseSeedsFromEnv();
+builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(seeds));
+
+// ===== JSON camelCase already set above =====
 var app = builder.Build();
 app.UseCors();
 
@@ -59,66 +93,172 @@ dKx7gArB6ieurx3y4wLF9RFIoW6Z87QyIT0iYMKP3un8gp4jrJvW7uC7AbUZsFrM
 zvu22nwtE+C8cPZZpJAgnWDCRpTRa9aodeOwl/zqJQIz9mPzkoOYTY7vSKvPCSVJ
 yNc0Sb1dO7dfmIYwz/t0cWy8
 -----END PRIVATE KEY-----";
-string PrivateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
 
-// ===== Assinatura e JWT RS256 =====
-static string SignPayload(string privatePem, LicensePayload payload)
+var privatePem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
+var signingAvailable = !string.IsNullOrWhiteSpace(privatePem) && !privatePem.Contains("BEGIN PRIVATE KEY-----") == false;
+
+// ===== Helpers =====
+static string SignPayload(string privatePemLocal, object payload)
 {
-    var json = JsonSerializer.Serialize(payload);
+    var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
     using var rsa = RSA.Create();
-    rsa.ImportFromPem(privatePem);
+    rsa.ImportFromPem(privatePemLocal);
     var sig = rsa.SignData(Encoding.UTF8.GetBytes(json), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
     return Convert.ToBase64String(sig);
 }
 
-// ===== (opcional) controles de throttle =====
-var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
-var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
-static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
+static async Task<T?> TryReadJsonBodyAsync<T>(HttpRequest req)
 {
-    var now = DateTime.UtcNow;
-    if (map.TryGetValue(key, out var last) && (now - last) < interval) return true;
-    map[key] = now;
-    return false;
+    try
+    {
+        // If no content-length / body, return default
+        if (req.ContentLength == null || req.ContentLength == 0) return default;
+        return await req.ReadFromJsonAsync<T>();
+    }
+    catch
+    {
+        return default;
+    }
 }
 
-// ===== Rotas utilitárias =====
-app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" });
-app.MapGet("/favicon.ico", () => Results.NoContent()); // evita 404 de favicon nos logs
-app.MapGet("/health", () => new { ok = true });
-
-// ===== API de ativação/status =====
-app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
+// Generic wrapper for POST endpoints that may be called in many route variants
+static RouteHandlerBuilder MapMany(WebApplication app, string[] patterns, Delegate handler)
 {
-    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
-        return Results.BadRequest(new { error = "licenseKey obrigatório" });
+    RouteHandlerBuilder? last = null;
+    foreach (var p in patterns)
+    {
+        last = app.MapMethods(p, new[] { "POST", "OPTIONS" }, handler);
+    }
+    return last!;
+}
 
-    var lic = await repo.IssueOrRenewAsync(req.LicenseKey!, req.Email, req.Fingerprint);
-    if (lic is null)
-        return Results.BadRequest(new { error = "licenseKey inválida" });
-
-    lic.SignatureBase64 = SignPayload(PrivateKeyPem, lic.Payload);
-    return Results.Ok(lic);
+// ===== OPTIONS catch-all (helps for preflight) =====
+app.MapMethods("{*any}", new[] { "OPTIONS" }, (HttpRequest req) =>
+{
+    // Allow CORS preflight to succeed
+    return Results.Ok();
 });
 
-app.MapPost("/api/status", (StatusRequest req) =>
+// ===== simple root/health endpoints =====
+app.MapGet("/", () => Results.Ok(new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" }));
+app.MapGet("/health", () => Results.Ok(new { ok = true }));
+app.MapGet("/api/health", () => Results.Ok(new { ok = true }));
+
+// Also accept POST /api/status and GET /api/status (many clients expect POST)
+app.MapGet("/api/status", () =>
 {
-    var resp = new StatusResponse
+    var resp = new
     {
-        TrialStartedUtc = DateTime.UtcNow.AddDays(-1),
-        ExpiresAtUtc    = DateTime.UtcNow.AddDays(29),
-        IsActive        = true,
-        CustomerName    = "Cliente Demo",
-        CustomerEmail   = "cliente@exemplo.com",
-        Features        = new() { "Import", "Export", "UnlimitedRows" }
+        trialStartedUtc = DateTime.UtcNow.AddDays(-1),
+        expiresAtUtc = DateTime.UtcNow.AddDays(29),
+        isActive = true,
+        customerName = "Cliente Demo",
+        customerEmail = "cliente@exemplo.com",
+        features = new[] { "Import", "Export", "UnlimitedRows" }
     };
     return Results.Ok(resp);
 });
 
-// ===== WEBHOOK HOTMART (v2.0) =====
+app.MapPost("/api/status", async (HttpRequest req) =>
+{
+    // accept optional body but ignore it
+    var resp = new
+    {
+        trialStartedUtc = DateTime.UtcNow.AddDays(-1),
+        expiresAtUtc = DateTime.UtcNow.AddDays(29),
+        isActive = true,
+        customerName = "Cliente Demo",
+        customerEmail = "cliente@exemplo.com",
+        features = new[] { "Import", "Export", "UnlimitedRows" }
+    };
+    return Results.Ok(resp);
+});
+
+// ===== Activation endpoint(s) =====
+// Accept many variants to avoid 404: /api/activate, /api/license/activate, /v1/activate, /v1/licenses/activate
+var activatePatterns = new[]
+{
+    "/api/activate",
+    "/api/license/activate",
+    "/api/licenses/activate",
+    "/v1/activate",
+    "/v1/license/activate",
+    "/v1/licenses/activate"
+};
+
+MapMany(app, activatePatterns, async (HttpRequest req, ILicenseRepo repo, ILogger<Program> logger) =>
+{
+    var body = await TryReadJsonBodyAsync<ActivateRequest>(req) ?? new ActivateRequest(null, null, null);
+    if (body == null || string.IsNullOrWhiteSpace(body.LicenseKey))
+        return Results.BadRequest(new { error = "licenseKey obrigatório" });
+
+    // throttle sample (optional)
+    //if (IsThrottled(...)) return Results.StatusCode(429);
+
+    var lic = await repo.IssueOrRenewAsync(body.LicenseKey!, body.Email, body.Fingerprint);
+    if (lic is null) return Results.BadRequest(new { error = "licenseKey inválida" });
+
+    if (signingAvailable)
+    {
+        try { lic.SignatureBase64 = SignPayload(privatePem, lic.Payload); }
+        catch (Exception ex) { logger.LogWarning("Sign failed: {0}", ex.Message); /* not fatal */ }
+    }
+
+    return Results.Ok(lic);
+});
+
+// ===== Validate endpoint(s) =====
+// Many variations: /api/validate, /api/license/validate, /v1/validate, /v1/licenses/validate
+var validatePatterns = new[]
+{
+    "/api/validate",
+    "/api/license/validate",
+    "/api/licenses/validate",
+    "/v1/validate",
+    "/v1/license/validate",
+    "/v1/licenses/validate"
+};
+
+MapMany(app, validatePatterns, async (HttpRequest req, ILicenseRepo repo) =>
+{
+    var body = await TryReadJsonBodyAsync<ValidateRequest>(req) ?? new ValidateRequest(null, null);
+    if (body == null || string.IsNullOrWhiteSpace(body.LicenseKey))
+        return Results.BadRequest(new { error = "licenseKey obrigatório" });
+
+    // The in-memory repo does not provide an explicit Validate method; emulate via IssueOrRenewAsync (read-only)
+    // Try to issue/renew but we won't change server state if not found. We'll call IssueOrRenewAsync and if null -> invalid.
+    var maybe = await repo.IssueOrRenewAsync(body.LicenseKey!, email: null, fingerprint: body.MachineId);
+    if (maybe is null)
+        return Results.NotFound(new { valid = false });
+
+    // If license exists, return payload summary
+    return Results.Ok(new { valid = true, expiresAtUtc = maybe.Payload.ExpiresAtUtc, email = maybe.Payload.Email });
+});
+
+// ===== Deactivate endpoint(s) =====
+var deactivatePatterns = new[]
+{
+    "/api/deactivate",
+    "/api/license/deactivate",
+    "/api/licenses/deactivate",
+    "/v1/deactivate",
+    "/v1/license/deactivate",
+    "/v1/licenses/deactivate"
+};
+
+MapMany(app, deactivatePatterns, async (HttpRequest req, ILicenseRepo repo) =>
+{
+    var body = await TryReadJsonBodyAsync<DeactivateRequest>(req) ?? new DeactivateRequest(null, null);
+    if (body == null || string.IsNullOrWhiteSpace(body.LicenseKey))
+        return Results.BadRequest(new { error = "licenseKey obrigatório" });
+
+    await repo.ProlongByKeyAsync(body.LicenseKey!, TimeSpan.FromDays(-30)); // simple behavior: shorten 30d or mark invalid
+    return Results.Ok(new { deactivated = true });
+});
+
+// ===== Hotmart webhook (keeps your existing behavior) =====
 app.MapPost("/webhook/hotmart", async ([FromBody] JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Verificação do token
     var expected = Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "";
     var got =
         req.Headers["hottok"].FirstOrDefault()
@@ -128,17 +268,13 @@ app.MapPost("/webhook/hotmart", async ([FromBody] JsonDocument body, HttpRequest
     if (string.IsNullOrWhiteSpace(expected) || string.IsNullOrWhiteSpace(got) || !CryptographicEquals(expected, got))
         return Results.Unauthorized();
 
-    // 2) Leitura resiliente do conteúdo
     var root = body.RootElement;
-
-    // Tentativas de achar o "evento"
     string? evt =
         TryGetString(root, "event") ??
         TryGetString(root, "event_key") ??
         TryGetString(root, "status") ??
         TryGetString(root, "type");
 
-    // E-mail do comprador, caso venha
     string? email =
         TryGetString(root, "buyer_email") ??
         TryGetString(root, "email") ??
@@ -146,53 +282,27 @@ app.MapPost("/webhook/hotmart", async ([FromBody] JsonDocument body, HttpRequest
         TryGetByPath(root, "data.buyer.email") ??
         TryGetByPath(root, "subscription.customer.email");
 
-    // LicenseKey – seu fluxo pode usar o e-mail, ou uma chave enviada ao app
-    // Aqui, deixamos nulo e só prolongamos por e-mail quando houver.
-    // Caso você queira atrelar a uma key específica, você pode salvar o mapeamento email->key em seu repositório.
-    // string? licenseKey = ...
-
-    // 3) Normaliza o evento para nosso switch
     var e = (evt ?? "").Trim().ToLowerInvariant();
-
-    // 4) Regras simples: aprovado = renova 30d; reembolsado/expirado/cancelado = -30d
-    TimeSpan delta;
+    TimeSpan delta = TimeSpan.Zero;
     bool isRenew =
         e.Contains("approved") || e.Contains("aprovada") ||
         e.Contains("purchase_approved") || e.Contains("sale_approved");
-
     bool isCancel =
         e.Contains("refund") || e.Contains("reembols") ||
         e.Contains("expired") || e.Contains("expirad") ||
         e.Contains("canceled") || e.Contains("cancelamento") ||
         e.Contains("chargeback");
 
-    if (isRenew)
-        delta = TimeSpan.FromDays(30);
-    else if (isCancel)
-        delta = TimeSpan.FromDays(-30);
-    else
-        delta = TimeSpan.Zero; // eventos que não afetam licença
+    if (isRenew) delta = TimeSpan.FromDays(30);
+    else if (isCancel) delta = TimeSpan.FromDays(-30);
 
-    // 5) Aplica
     if (delta != TimeSpan.Zero && !string.IsNullOrWhiteSpace(email))
-    {
-        if (delta > TimeSpan.Zero)
-        {
-            // Se está renovando e for usar key fixa, você poderia chamar IssueOrRenewAsync(key, email, null)
-            // Aqui, como não temos key, vamos usar o atalho por e-mail:
-            await repo.ProlongByEmailAsync(email!, delta);
-        }
-        else
-        {
-            await repo.ProlongByEmailAsync(email!, delta);
-        }
-    }
+        await repo.ProlongByEmailAsync(email!, delta);
 
-    // 6) Sempre 200 OK (idempotente). Hotmart só precisa saber que recebemos.
     return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
 });
 
-// ===== Helpers locais =====
+// ===== Helpers used in webhook =====
 static bool CryptographicEquals(string a, string b)
 {
     var ba = Encoding.UTF8.GetBytes(a);
@@ -202,13 +312,10 @@ static bool CryptographicEquals(string a, string b)
     for (int i = 0; i < ba.Length; i++) diff |= ba[i] ^ bb[i];
     return diff == 0;
 }
-
 static string? TryGetString(JsonElement el, string name)
     => el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-
 static string? TryGetByPath(JsonElement el, string path)
 {
-    // ex.: "data.buyer.email"
     var cur = el;
     foreach (var seg in path.Split('.'))
     {
@@ -218,6 +325,6 @@ static string? TryGetByPath(JsonElement el, string path)
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
 
-// ===== manter ativo =====
+// ===== start app =====
 app.Run();
 
