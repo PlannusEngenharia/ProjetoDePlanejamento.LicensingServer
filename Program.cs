@@ -168,6 +168,18 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 
     return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
 });
+app.MapPost("/api/check", async (HttpRequest req) =>
+{
+    // Pode ler o body se quiser (licenseKey/fingerprint). Para POC, ignora.
+    var resp = new
+    {
+        active = true,           // ou false conforme sua regra
+        plan = "monthly",
+        nextCheckSeconds = 43200, // 12h de backoff
+        token = (string?)null     // se quiser, depois mande um JWT RS256 aqui
+    };
+    return Results.Ok(resp);
+});
 
 // ===== helpers =====
 static bool CryptographicEquals(string a, string b)
