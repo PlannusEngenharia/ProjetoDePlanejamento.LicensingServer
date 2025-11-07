@@ -137,19 +137,21 @@ app.MapPost("/api/check", (HttpRequest _) =>
 // ===== Webhook Hotmart (v2) =====
 app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Valida HOTTOK
-    var expected = Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "";
-    var got =
+    // 1) Valida HOTTOK (faz Trim para eliminar espaços/linhas acidentais)
+    var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
+
+    string? got =
         req.Headers["hottok"].FirstOrDefault()
         ?? req.Headers["HOTTOK"].FirstOrDefault()
         ?? req.Headers["x-hotmart-hottok"].FirstOrDefault();
 
-    if (string.IsNullOrWhiteSpace(expected) || string.IsNullOrWhiteSpace(got) || !CryptographicEquals(expected, got))
+    got = got?.Trim();
+
+    if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
         return Results.Unauthorized();
 
-    // 2) Extrai campos relevantes (resiliente a variações)
+    // ... (restante do handler fica igual)
     var root = body.RootElement;
-
     string? evt =
         TryGetString(root, "event") ??
         TryGetString(root, "event_key") ??
@@ -163,7 +165,6 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
         TryGetByPath(root, "data.buyer.email") ??
         TryGetByPath(root, "subscription.customer.email");
 
-    // 3) Normaliza evento
     var e = (evt ?? "").Trim().ToLowerInvariant();
 
     bool isRenew =
@@ -186,6 +187,7 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 
     return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
 });
+
 
 // ===== Helpers =====
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
