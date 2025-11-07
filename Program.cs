@@ -229,6 +229,22 @@ static string? TryGetByPath(JsonElement el, string path)
     }
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
+// ===== Download trial (redireciona para o instalador do GitHub) =====
+// Use uma variável de ambiente para não “fixar” a versão no código
+var trialUrl = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL")
+    ?? "https://github.com/PlannusEngenharia/ProjetoDePlanejamento.LicensingServer/releases/download/v1.0.0/PlannusSetup-1.0.0.exe";
+
+app.MapGet("/download/demo", (HttpRequest req, HttpContext ctx) =>
+{
+    // Log simples para rastrear (aparece nos HTTP Logs do Railway)
+    var ip  = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var ua  = req.Headers["User-Agent"].ToString();
+    Console.WriteLine($"[download/demo] ip={ip} ua={ua}");
+
+    // Redireciona. 302 é suficiente aqui.
+    return Results.Redirect(trialUrl, permanent: false);
+});
+
 
 app.Run();
 
