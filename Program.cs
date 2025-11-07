@@ -230,5 +230,5 @@ static string? TryGetByPath(JsonElement el, string path)
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
 
-
+app.Run();
 
