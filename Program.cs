@@ -1,46 +1,45 @@
-// Program.cs — versão compatível com .NET 8 e Railway
+// Program.cs
 using ProjetoDePlanejamento.LicensingServer;
 using ProjetoDePlanejamento.LicensingServer.Contracts;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Data.Sqlite;
-using System.Text.Json.Serialization;
 
-// ===== Configuração inicial =====
 var builder = WebApplication.CreateBuilder(args);
 
-// Porta usada pelo Railway
+// ===== Porta para Railway =====
 var port = Environment.GetEnvironmentVariable("PORT") ?? "7019";
 builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-// JSON camelCase
-builder.Services.ConfigureHttpJsonOptions(o =>
-{
-    o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    o.SerializerOptions.WriteIndented = false;
-});
+// ===== JSON camelCase =====
+builder.Services.ConfigureHttpJsonOptions(
+    (Microsoft.AspNetCore.Http.Json.JsonOptions o) =>
+    {
+        o.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        o.SerializerOptions.WriteIndented = false;
+    });
 
-// CORS liberado (para o app cliente conectar)
-builder.Services.AddCors(opt =>
-    opt.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+// ===== CORS =====
+builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
+    p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
-// Repositório em memória para chaves teste
+// ===== Repositório em memória (seed de teste) =====
+//  -> Troque pelo seu repositório real quando conectar a um DB
 builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
 
 var app = builder.Build();
 app.UseCors();
 
-// ===== Variáveis de ambiente =====
-var demoDownloadUrl = Environment.GetEnvironmentVariable("DEMO_DOWNLOAD_URL")
-    ?? "https://SEU-LINK-DE-INSTALADOR/PlannusDemoSetup.exe"; // altere depois
-
-var dataDir = Path.Combine(AppContext.BaseDirectory, "data");
-Directory.CreateDirectory(dataDir);
-var telemetryDbPath = Path.Combine(dataDir, "telemetry.db");
-
-// ===== Chave privada =====
+// ======================================================================
+//  CHAVE PRIVADA (use ENV em produção)
+//
+//  1) Railway -> Variables:
+//     - PRIVATE_KEY_PEM  : cole a chave PEM completa (com BEGIN/END)
+//     - HOTMART_HOTTOK   : seu hottok do Hotmart
+//
+//  2) Se a variável não existir, usa o fallback abaixo (apenas DEV).
+// ======================================================================
 const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM
 wXJ3GVOpG75OeF0zv6iwYAYK7HMlMpHARhrl/K7xAh5p1r1zrR1R83AxLUAPWvTE
@@ -71,37 +70,35 @@ yNc0Sb1dO7dfmIYwz/t0cWy8
 -----END PRIVATE KEY-----";
 
 string privateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
-privateKeyPem = privateKeyPem.Replace("\\r", "\r").Replace("\\n", "\n").Trim();
 
-// Throttle simples
-var lastHitByIp = new ConcurrentDictionary<string, DateTime>();
-EnsureTelemetrySchema(telemetryDbPath);
+// Normaliza quebras de linha caso o ENV tenha vindo com \n literais
+privateKeyPem = privateKeyPem
+    .Replace("\\r", "\r")
+    .Replace("\\n", "\n")
+    .Replace("\r\n", "\n")
+    .Trim();
 
-// ===== Rotas principais =====
+// ===== Throttle (opcional, simples) =====
+var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
+var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
+
+// ===== Rotas utilitárias =====
 app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" });
+app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
-// Download demo → loga e redireciona
-app.MapGet("/download/demo", async (HttpContext http) =>
-{
-    var email = http.Request.Query["email"].ToString();
-    var ip = GetClientIp(http);
-    var ua = http.Request.Headers.UserAgent.ToString();
-    await LogDownloadAsync(telemetryDbPath, email, ip, ua);
-    return Results.Redirect(demoDownloadUrl);
-});
-
-// Ativação de licença
+// ===== API: ATIVAR (gera/renova licença e assina payload) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, HttpContext http) =>
 {
     if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { error = "licenseKey obrigatório" });
 
-    var ip = GetClientIp(http) ?? "unknown";
+    // Throttle básico por IP (3s)
+    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     if (IsThrottled(lastHitByIp, ip, TimeSpan.FromSeconds(3)))
         return Results.StatusCode(StatusCodes.Status429TooManyRequests);
 
-    var lic = await repo.IssueOrRenewAsync(req.LicenseKey.Trim(), req.Email, req.Fingerprint);
+    var lic = await repo.IssueOrRenewAsync(req.LicenseKey!.Trim(), req.Email, req.Fingerprint);
     if (lic is null)
         return Results.BadRequest(new { error = "licenseKey inválida" });
 
@@ -109,76 +106,90 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, Http
     return Results.Ok(lic);
 });
 
-// Ping check
-app.MapPost("/api/check", async (HttpContext http) =>
+// ===== API: STATUS (stub para POC) =====
+app.MapPost("/api/status", (StatusRequest req) =>
 {
-    var req = await http.Request.ReadFromJsonAsync<CheckRequest>() ?? new();
-    var fp = req.Fingerprint ?? "unknown";
-    await LogCheckinAsync(telemetryDbPath, fp, req.AppVersion, req.LicenseKey, GetClientIp(http), http.Request.Headers.UserAgent.ToString());
-    return Results.Ok(new { active = true, plan = "trial-or-paid", nextCheckSeconds = 43200 });
+    var resp = new StatusResponse
+    {
+        TrialStartedUtc = DateTime.UtcNow.AddDays(-1),
+        ExpiresAtUtc    = DateTime.UtcNow.AddDays(29),
+        IsActive        = true,
+        CustomerName    = "Cliente Demo",
+        CustomerEmail   = "cliente@exemplo.com",
+        Features        = new() { "Import", "Export", "UnlimitedRows" }
+    };
+    return Results.Ok(resp);
 });
 
-app.Run();
-
-// ===== Classes auxiliares =====
-sealed class CheckRequest
+// ===== API: CHECK (ping periódico do app cliente) =====
+app.MapPost("/api/check", (HttpRequest _) =>
 {
-    [JsonPropertyName("licenseKey")] public string? LicenseKey { get; set; }
-    [JsonPropertyName("fingerprint")] public string? Fingerprint { get; set; }
-    [JsonPropertyName("appVersion")] public string? AppVersion { get; set; }
-}
+    var resp = new
+    {
+        active = true,
+        plan = "monthly",
+        nextCheckSeconds = 43200, // 12h
+        token = (string?)null
+    };
+    return Results.Ok(resp);
+});
 
-// ===== Funções auxiliares =====
-static void EnsureTelemetrySchema(string dbPath)
+// ===== Webhook Hotmart (v2) =====
+app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    using var con = new SqliteConnection($"Data Source={dbPath}");
-    con.Open();
-    var cmd = con.CreateCommand();
-    cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS download_logs(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- email TEXT, ip TEXT, user_agent TEXT, downloaded_at_utc TEXT);
-CREATE TABLE IF NOT EXISTS checkins(
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- fingerprint TEXT, app_version TEXT, license_key TEXT,
- ip TEXT, user_agent TEXT, checked_at_utc TEXT);";
-    cmd.ExecuteNonQuery();
-}
+    // 1) Valida HOTTOK (faz Trim para eliminar espaços/linhas acidentais)
+    var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
 
-static async Task LogDownloadAsync(string db, string? email, string? ip, string? ua)
-{
-    using var c = new SqliteConnection($"Data Source={db}");
-    await c.OpenAsync();
-    var cmd = c.CreateCommand();
-    cmd.CommandText = "INSERT INTO download_logs(email,ip,user_agent,downloaded_at_utc) VALUES(@e,@i,@u,@t)";
-    cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@i", ip);
-    cmd.Parameters.AddWithValue("@u", ua);
-    cmd.Parameters.AddWithValue("@t", DateTime.UtcNow.ToString("u"));
-    await cmd.ExecuteNonQueryAsync();
-}
+    string? got =
+        req.Headers["hottok"].FirstOrDefault()
+        ?? req.Headers["HOTTOK"].FirstOrDefault()
+        ?? req.Headers["x-hotmart-hottok"].FirstOrDefault();
 
-static async Task LogCheckinAsync(string db, string fp, string? v, string? key, string? ip, string? ua)
-{
-    using var c = new SqliteConnection($"Data Source={db}");
-    await c.OpenAsync();
-    var cmd = c.CreateCommand();
-    cmd.CommandText = "INSERT INTO checkins(fingerprint,app_version,license_key,ip,user_agent,checked_at_utc) VALUES(@f,@v,@k,@i,@u,@t)";
-    cmd.Parameters.AddWithValue("@f", fp);
-    cmd.Parameters.AddWithValue("@v", (object?)v ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@k", (object?)key ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@i", (object?)ip ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@u", (object?)ua ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@t", DateTime.UtcNow.ToString("u"));
-    await cmd.ExecuteNonQueryAsync();
-}
+    got = got?.Trim();
 
-static string? GetClientIp(HttpContext ctx)
-{
-    var fwd = ctx.Request.Headers["X-Forwarded-For"].FirstOrDefault();
-    return !string.IsNullOrWhiteSpace(fwd) ? fwd.Split(',')[0].Trim() : ctx.Connection.RemoteIpAddress?.ToString();
-}
+    if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
+        return Results.Unauthorized();
 
+    // ... (restante do handler fica igual)
+    var root = body.RootElement;
+    string? evt =
+        TryGetString(root, "event") ??
+        TryGetString(root, "event_key") ??
+        TryGetString(root, "status") ??
+        TryGetString(root, "type");
+
+    string? email =
+        TryGetString(root, "buyer_email") ??
+        TryGetString(root, "email") ??
+        TryGetString(root, "customer_email") ??
+        TryGetByPath(root, "data.buyer.email") ??
+        TryGetByPath(root, "subscription.customer.email");
+
+    var e = (evt ?? "").Trim().ToLowerInvariant();
+
+    bool isRenew =
+        e.Contains("approved") || e.Contains("aprovad") ||
+        e.Contains("purchase_approved") || e.Contains("sale_approved");
+
+    bool isCancel =
+        e.Contains("refund") || e.Contains("reembols") ||
+        e.Contains("expired") || e.Contains("expirad") ||
+        e.Contains("canceled") || e.Contains("cancel") ||
+        e.Contains("chargeback");
+
+    TimeSpan delta =
+        isRenew ? TimeSpan.FromDays(30) :
+        isCancel ? TimeSpan.FromDays(-30) :
+        TimeSpan.Zero;
+
+    if (delta != TimeSpan.Zero && !string.IsNullOrWhiteSpace(email))
+        await repo.ProlongByEmailAsync(email!.Trim().ToLowerInvariant(), delta);
+
+    return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
+});
+
+
+// ===== Helpers =====
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
 {
     var now = DateTime.UtcNow;
@@ -187,15 +198,37 @@ static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan 
     return false;
 }
 
-static string SignPayload(string pem, LicensePayload payload)
+static string SignPayload(string privatePem, LicensePayload payload)
 {
     var json = JsonSerializer.Serialize(payload);
     using var rsa = RSA.Create();
-    rsa.ImportFromPem(pem);
+    rsa.ImportFromPem(privatePem);
     var sig = rsa.SignData(Encoding.UTF8.GetBytes(json), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
     return Convert.ToBase64String(sig);
 }
 
+static bool CryptographicEquals(string a, string b)
+{
+    var ba = Encoding.UTF8.GetBytes(a);
+    var bb = Encoding.UTF8.GetBytes(b);
+    if (ba.Length != bb.Length) return false;
+    int diff = 0; for (int i = 0; i < ba.Length; i++) diff |= ba[i] ^ bb[i];
+    return diff == 0;
+}
+
+static string? TryGetString(JsonElement el, string name)
+    => el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+static string? TryGetByPath(JsonElement el, string path)
+{
+    var cur = el;
+    foreach (var seg in path.Split('.'))
+    {
+        if (!cur.TryGetProperty(seg, out var next)) return null;
+        cur = next;
+    }
+    return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
+}
 
 
 
