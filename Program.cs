@@ -25,7 +25,6 @@ builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 // ===== Repositório em memória (seed de teste) =====
-//  -> Troque pelo seu repositório real quando conectar a um DB
 builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
 
 var app = builder.Build();
@@ -33,12 +32,6 @@ app.UseCors();
 
 // ======================================================================
 //  CHAVE PRIVADA (use ENV em produção)
-//
-//  1) Railway -> Variables:
-//     - PRIVATE_KEY_PEM  : cole a chave PEM completa (com BEGIN/END)
-//     - HOTMART_HOTTOK   : seu hottok do Hotmart
-//
-//  2) Se a variável não existir, usa o fallback abaixo (apenas DEV).
 // ======================================================================
 const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM
@@ -70,32 +63,37 @@ yNc0Sb1dO7dfmIYwz/t0cWy8
 -----END PRIVATE KEY-----";
 
 string privateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
+privateKeyPem = privateKeyPem.Replace("\\r", "\r").Replace("\\n", "\n").Replace("\r\n", "\n").Trim();
 
-// Normaliza quebras de linha caso o ENV tenha vindo com \n literais
-privateKeyPem = privateKeyPem
-    .Replace("\\r", "\r")
-    .Replace("\\n", "\n")
-    .Replace("\r\n", "\n")
-    .Trim();
+// ====== TELEMETRIA EM MEMÓRIA (leve) ======
+var adminToken = (Environment.GetEnvironmentVariable("ADMIN_TOKEN") ?? "").Trim();
+var demoUrl    = (Environment.GetEnvironmentVariable("DEMO_DOWNLOAD_URL") ?? "").Trim();
 
-// ===== Throttle (opcional, simples) =====
-var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
-var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
+var Telemetry = new TelemetryStore(capacity: 1000);
 
 // ===== Rotas utilitárias =====
 app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" });
 app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
-// ===== API: ATIVAR (gera/renova licença e assina payload) =====
+// ===== Link público de download (redirect + telemetria) =====
+app.MapGet("/download/demo", (HttpRequest req, HttpResponse res) =>
+{
+    if (string.IsNullOrWhiteSpace(demoUrl))
+        return Results.Problem("DEMO_DOWNLOAD_URL não configurada no servidor.", statusCode: 500);
+
+    Telemetry.Log(req, "GET", "/download/demo", new { kind = "demo", ua = req.Headers.UserAgent.ToString() });
+    return Results.Redirect(demoUrl, permanent: false);
+});
+
+// ===== API: ATIVAR =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, HttpContext http) =>
 {
     if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { error = "licenseKey obrigatório" });
 
-    // Throttle básico por IP (3s)
     var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    if (IsThrottled(lastHitByIp, ip, TimeSpan.FromSeconds(3)))
+    if (IsThrottled(Telemetry.LastHitByIp, ip, TimeSpan.FromSeconds(3)))
         return Results.StatusCode(StatusCodes.Status429TooManyRequests);
 
     var lic = await repo.IssueOrRenewAsync(req.LicenseKey!.Trim(), req.Email, req.Fingerprint);
@@ -103,11 +101,17 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, Http
         return Results.BadRequest(new { error = "licenseKey inválida" });
 
     lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload);
+
+    Telemetry.Log(http.Request, "POST", "/api/activate", new
+    {
+        key = req.LicenseKey, email = req.Email, fp = req.Fingerprint, ok = true
+    });
+
     return Results.Ok(lic);
 });
 
-// ===== API: STATUS (stub para POC) =====
-app.MapPost("/api/status", (StatusRequest req) =>
+// ===== API: STATUS (stub POC) =====
+app.MapPost("/api/status", (StatusRequest req, HttpRequest httpReq) =>
 {
     var resp = new StatusResponse
     {
@@ -118,40 +122,37 @@ app.MapPost("/api/status", (StatusRequest req) =>
         CustomerEmail   = "cliente@exemplo.com",
         Features        = new() { "Import", "Export", "UnlimitedRows" }
     };
+
+    Telemetry.Log(httpReq, "POST", "/api/status", new { ok = true });
     return Results.Ok(resp);
 });
 
-// ===== API: CHECK (ping periódico do app cliente) =====
-app.MapPost("/api/check", (HttpRequest _) =>
+// ===== API: CHECK (ping periódico) =====
+app.MapPost("/api/check", (HttpRequest req) =>
 {
-    var resp = new
-    {
-        active = true,
-        plan = "monthly",
-        nextCheckSeconds = 43200, // 12h
-        token = (string?)null
-    };
+    var resp = new { active = true, plan = "monthly", nextCheckSeconds = 43200, token = (string?)null };
+    Telemetry.Log(req, "POST", "/api/check", new { ok = true });
     return Results.Ok(resp);
 });
 
 // ===== Webhook Hotmart (v2) =====
 app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Valida HOTTOK (faz Trim para eliminar espaços/linhas acidentais)
     var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
-
     string? got =
         req.Headers["hottok"].FirstOrDefault()
         ?? req.Headers["HOTTOK"].FirstOrDefault()
         ?? req.Headers["x-hotmart-hottok"].FirstOrDefault();
-
     got = got?.Trim();
 
     if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
+    {
+        Telemetry.Log(req, "POST", "/webhook/hotmart", new { ok = false, reason = "unauthorized" });
         return Results.Unauthorized();
+    }
 
-    // ... (restante do handler fica igual)
     var root = body.RootElement;
+
     string? evt =
         TryGetString(root, "event") ??
         TryGetString(root, "event_key") ??
@@ -185,12 +186,22 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     if (delta != TimeSpan.Zero && !string.IsNullOrWhiteSpace(email))
         await repo.ProlongByEmailAsync(email!.Trim().ToLowerInvariant(), delta);
 
+    Telemetry.Log(req, "POST", "/webhook/hotmart", new { ok = true, eventRaw = evt, appliedDays = delta.TotalDays, email });
+
     return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
 });
 
+// ===== Admin: Estatísticas simples =====
+app.MapGet("/admin/stats", (HttpRequest req) =>
+{
+    if (!IsAdmin(req, adminToken)) return Results.Unauthorized();
+
+    var report = Telemetry.GetReport();
+    return Results.Ok(report);
+});
 
 // ===== Helpers =====
-static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
+static bool IsThrottled(ConcurrentDictionary<string, DateTime> map, string key, TimeSpan interval)
 {
     var now = DateTime.UtcNow;
     if (map.TryGetValue(key, out var last) && (now - last) < interval) return true;
@@ -230,5 +241,60 @@ static string? TryGetByPath(JsonElement el, string path)
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
 
+static bool IsAdmin(HttpRequest req, string adminToken)
+{
+    if (string.IsNullOrWhiteSpace(adminToken)) return false;
+    var header = req.Headers["x-admin-token"].FirstOrDefault()?.Trim();
+    var query  = req.Query["token"].FirstOrDefault()?.Trim();
+    var got    = header ?? query;
+    return !string.IsNullOrWhiteSpace(got) && CryptographicEquals(adminToken, got!);
+}
+
+// ===== Telemetria: estrutura leve em memória =====
+sealed class TelemetryStore
+{
+    private readonly int _cap;
+    private readonly ConcurrentQueue<object> _events = new();
+    public ConcurrentDictionary<string, long> Counters { get; } = new();
+    public ConcurrentDictionary<string, DateTime> LastHitByIp { get; } = new();
+
+    public TelemetryStore(int capacity = 1000) => _cap = capacity;
+
+    public void Log(HttpRequest req, string method, string path, object data)
+    {
+        var ip = req.HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        var ua = req.Headers.UserAgent.ToString();
+
+        Increment($"hits:{path}");
+        Increment($"method:{method}");
+        Increment("hits:total");
+
+        var evt = new
+        {
+            ts = DateTime.UtcNow,
+            ip,
+            ua,
+            method,
+            path,
+            data
+        };
+
+        _events.Enqueue(evt);
+        while (_events.Count > _cap && _events.TryDequeue(out _)) { }
+    }
+
+    public object GetReport()
+    {
+        var snapshot = _events.ToArray();
+        var totals = Counters.ToDictionary(k => k.Key, v => v.Value);
+        var last100 = snapshot.TakeLast(100);
+        return new { totals, last = last100 };
+    }
+
+    private void Increment(string key)
+        => Counters.AddOrUpdate(key, 1, (_, v) => v + 1);
+}
+
 app.Run();
+
 
