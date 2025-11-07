@@ -6,6 +6,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
+// === NOVOS USINGS PARA TELEMETRIA ===
+using Microsoft.Data.Sqlite;
+using System.Text.Json.Serialization;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ===== Porta para Railway =====
@@ -25,20 +29,26 @@ builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
 // ===== Repositório em memória (seed de teste) =====
-//  -> Troque pelo seu repositório real quando conectar a um DB
+//  -> Troque por repo real quando conectar a um DB
 builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
 
 var app = builder.Build();
 app.UseCors();
 
 // ======================================================================
+//  Variáveis de ambiente úteis
+// ======================================================================
+var demoDownloadUrl = Environment.GetEnvironmentVariable("DEMO_DOWNLOAD_URL")
+    ?? "https://SEU-DOMINIO/arquivos/PlannusDemoSetup.exe"; // <-- TROQUE DEPOIS
+
+var dataDir = Path.Combine(AppContext.BaseDirectory, "data");
+Directory.CreateDirectory(dataDir);
+var telemetryDbPath = Path.Combine(dataDir, "telemetry.db");
+
+// ======================================================================
 //  CHAVE PRIVADA (use ENV em produção)
-//
-//  1) Railway -> Variables:
 //     - PRIVATE_KEY_PEM  : cole a chave PEM completa (com BEGIN/END)
 //     - HOTMART_HOTTOK   : seu hottok do Hotmart
-//
-//  2) Se a variável não existir, usa o fallback abaixo (apenas DEV).
 // ======================================================================
 const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM
@@ -71,7 +81,7 @@ yNc0Sb1dO7dfmIYwz/t0cWy8
 
 string privateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
 
-// Normaliza quebras de linha caso o ENV tenha vindo com \n literais
+// Normaliza \n literais caso ENV venha “escapado”
 privateKeyPem = privateKeyPem
     .Replace("\\r", "\r")
     .Replace("\\n", "\n")
@@ -82,10 +92,26 @@ privateKeyPem = privateKeyPem
 var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
 var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
 
+// ====== Telemetria: prepara SQLite ======
+EnsureTelemetrySchema(telemetryDbPath);
+
 // ===== Rotas utilitárias =====
 app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.LicensingServer" });
 app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
+
+// ===== DOWNLOAD DEMO (loga e redireciona) =====
+app.MapGet("/download/demo", async (HttpContext http) =>
+{
+    var email = http.Request.Query["email"].ToString(); // opcional: ?email=...
+    var ip = GetClientIp(http);
+    var ua = http.Request.Headers.UserAgent.ToString();
+
+    await LogDownloadAsync(telemetryDbPath, string.IsNullOrWhiteSpace(email) ? null : email, ip, ua);
+
+    // redireciona para o instalador real
+    return Results.Redirect(demoDownloadUrl);
+});
 
 // ===== API: ATIVAR (gera/renova licença e assina payload) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, HttpContext http) =>
@@ -94,7 +120,7 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, Http
         return Results.BadRequest(new { error = "licenseKey obrigatório" });
 
     // Throttle básico por IP (3s)
-    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var ip = GetClientIp(http) ?? "unknown";
     if (IsThrottled(lastHitByIp, ip, TimeSpan.FromSeconds(3)))
         return Results.StatusCode(StatusCodes.Status429TooManyRequests);
 
@@ -121,23 +147,53 @@ app.MapPost("/api/status", (StatusRequest req) =>
     return Results.Ok(resp);
 });
 
-// ===== API: CHECK (ping periódico do app cliente) =====
-app.MapPost("/api/check", (HttpRequest _) =>
+// ==== Modelo do check (entrada do cliente) ====
+sealed class CheckRequest
 {
-    var resp = new
+    [JsonPropertyName("licenseKey")] public string? LicenseKey { get; set; }
+    [JsonPropertyName("fingerprint")] public string? Fingerprint { get; set; }
+    [JsonPropertyName("client")] public string? Client { get; set; } // ex.: "Planner/1.2.3"
+    [JsonPropertyName("appVersion")] public string? AppVersion { get; set; } // opcional
+}
+
+// ===== API: CHECK (ping periódico + log) =====
+app.MapPost("/api/check", async (HttpContext http) =>
+{
+    try
     {
-        active = true,
-        plan = "monthly",
-        nextCheckSeconds = 43200, // 12h
-        token = (string?)null
-    };
-    return Results.Ok(resp);
+        var req = await http.Request.ReadFromJsonAsync<CheckRequest>() ?? new();
+        var fingerprint = (req.Fingerprint ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(fingerprint))
+            return Results.BadRequest(new { error = "fingerprint obrigatório" });
+
+        var ip = GetClientIp(http);
+        var ua = http.Request.Headers.UserAgent.ToString();
+        var version = !string.IsNullOrWhiteSpace(req.AppVersion) ? req.AppVersion
+                    : (req.Client ?? "").Split('/').LastOrDefault();
+
+        await LogCheckinAsync(telemetryDbPath, fingerprint, version, req.LicenseKey, ip, ua);
+        await UpsertActivationAsync(telemetryDbPath, req.LicenseKey, fingerprint);
+
+        var resp = new
+        {
+            active = true,
+            plan = "trial-or-paid",
+            nextCheckSeconds = 43200, // 12h
+            token = (string?)null
+        };
+        return Results.Ok(resp);
+    }
+    catch
+    {
+        var resp = new { active = true, nextCheckSeconds = 43200 };
+        return Results.Ok(resp);
+    }
 });
 
 // ===== Webhook Hotmart (v2) =====
 app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Valida HOTTOK (faz Trim para eliminar espaços/linhas acidentais)
+    // 1) Valida HOTTOK (Trim para eliminar espaços/linhas acidentais)
     var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
 
     string? got =
@@ -150,8 +206,9 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
         return Results.Unauthorized();
 
-    // ... (restante do handler fica igual)
+    // 2) Extrai campos relevantes
     var root = body.RootElement;
+
     string? evt =
         TryGetString(root, "event") ??
         TryGetString(root, "event_key") ??
@@ -165,6 +222,7 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
         TryGetByPath(root, "data.buyer.email") ??
         TryGetByPath(root, "subscription.customer.email");
 
+    // 3) Normaliza evento
     var e = (evt ?? "").Trim().ToLowerInvariant();
 
     bool isRenew =
@@ -187,7 +245,6 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 
     return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
 });
-
 
 // ===== Helpers =====
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
@@ -230,6 +287,117 @@ static string? TryGetByPath(JsonElement el, string path)
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
 
+// ===== Helpers Telemetria (SQLite) =====
+static void EnsureTelemetrySchema(string dbPath)
+{
+    using var con = new SqliteConnection($"Data Source={dbPath};Cache=Shared");
+    con.Open();
+
+    var cmd = con.CreateCommand();
+    cmd.CommandText = @"
+CREATE TABLE IF NOT EXISTS download_logs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  email             TEXT,
+  ip                TEXT,
+  user_agent        TEXT,
+  downloaded_at_utc TEXT
+);
+
+CREATE TABLE IF NOT EXISTS checkins (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint       TEXT,
+  app_version       TEXT,
+  license_key       TEXT,
+  ip                TEXT,
+  user_agent        TEXT,
+  checked_at_utc    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS activations (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  license_key       TEXT NOT NULL,
+  fingerprint       TEXT NOT NULL,
+  first_seen_utc    TEXT NOT NULL,
+  last_seen_utc     TEXT NOT NULL,
+  UNIQUE(license_key, fingerprint)
+);";
+    cmd.ExecuteNonQuery();
+}
+
+static string UtcNow() => DateTime.UtcNow.ToString("u");
+
+static async Task LogDownloadAsync(string dbPath, string? email, string? ip, string? userAgent)
+{
+    using var con = new SqliteConnection($"Data Source={dbPath};Cache=Shared");
+    await con.OpenAsync();
+    using var cmd = con.CreateCommand();
+    cmd.CommandText = @"INSERT INTO download_logs(email, ip, user_agent, downloaded_at_utc)
+                        VALUES (@e, @ip, @ua, @ts)";
+    cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ua", (object?)userAgent ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ts", UtcNow());
+    await cmd.ExecuteNonQueryAsync();
+}
+
+static async Task UpsertActivationAsync(string dbPath, string? licenseKey, string fingerprint)
+{
+    licenseKey ??= ""; // trial local pode vir vazio; ainda assim rastreamos
+    using var con = new SqliteConnection($"Data Source={dbPath};Cache=Shared");
+    await con.OpenAsync();
+
+    // tenta update; se 0 linhas, insere
+    using (var upd = con.CreateCommand())
+    {
+        upd.CommandText = @"UPDATE activations
+                            SET last_seen_utc=@now
+                            WHERE license_key=@k AND fingerprint=@f";
+        upd.Parameters.AddWithValue("@now", UtcNow());
+        upd.Parameters.AddWithValue("@k", licenseKey);
+        upd.Parameters.AddWithValue("@f", fingerprint);
+        var n = await upd.ExecuteNonQueryAsync();
+        if (n > 0) return;
+    }
+
+    using (var ins = con.CreateCommand())
+    {
+        ins.CommandText = @"INSERT OR IGNORE INTO activations
+                            (license_key, fingerprint, first_seen_utc, last_seen_utc)
+                            VALUES (@k, @f, @now, @now)";
+        ins.Parameters.AddWithValue("@k", licenseKey);
+        ins.Parameters.AddWithValue("@f", fingerprint);
+        ins.Parameters.AddWithValue("@now", UtcNow());
+        await ins.ExecuteNonQueryAsync();
+    }
+}
+
+static async Task LogCheckinAsync(string dbPath, string fingerprint, string? appVersion,
+                                  string? licenseKey, string? ip, string? userAgent)
+{
+    using var con = new SqliteConnection($"Data Source={dbPath};Cache=Shared");
+    await con.OpenAsync();
+
+    using var cmd = con.CreateCommand();
+    cmd.CommandText = @"INSERT INTO checkins(fingerprint, app_version, license_key, ip, user_agent, checked_at_utc)
+                        VALUES (@f, @v, @k, @ip, @ua, @ts)";
+    cmd.Parameters.AddWithValue("@f", fingerprint);
+    cmd.Parameters.AddWithValue("@v", (object?)appVersion ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@k", (object?)licenseKey ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ua", (object?)userAgent ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ts", UtcNow());
+    await cmd.ExecuteNonQueryAsync();
+}
+
+static string? GetClientIp(HttpContext ctx)
+{
+    // Railway geralmente injeta X-Forwarded-For
+    var fwd = ctx.Request.Headers["X-Forwarded-For"].FirstOrDefault();
+    if (!string.IsNullOrWhiteSpace(fwd)) return fwd.Split(',')[0].Trim();
+    return ctx.Connection.RemoteIpAddress?.ToString();
+}
+
 app.Run();
+
 
 
