@@ -244,6 +244,34 @@ app.MapGet("/download/demo", (HttpRequest req, HttpContext ctx) =>
     // Redireciona. 302 é suficiente aqui.
     return Results.Redirect(trialUrl, permanent: false);
 });
+app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, HttpContext ctx) =>
+{
+    var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    var ua = req.Headers["User-Agent"].ToString();
+    Console.WriteLine($"[/download/demo] {req.Method} ip={ip} ua={ua}");
+
+    var ual = ua.ToLowerInvariant();
+    bool isMobile = ual.Contains("iphone") || ual.Contains("ipad") || ual.Contains("android");
+
+    if (isMobile && req.Method == "GET")
+    {
+        var html = $"""
+        <!doctype html><meta charset="utf-8">
+        <title>Baixar no computador</title>
+        <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:680px;margin:48px auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;">
+          <h2>Baixe no seu computador Windows</h2>
+          <p>Este instalador <b>(.exe)</b> só funciona no Windows.<br>
+          Envie este link para seu e-mail ou abra no computador para baixar.</p>
+          <p style="margin-top:16px"><a href="{trialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">
+            Baixar instalador
+          </a></p>
+        </div>
+        """;
+        return Results.Content(html, "text/html; charset=utf-8");
+    }
+
+    return Results.Redirect(trialUrl, permanent: false);
+});
 
 
 app.Run();
