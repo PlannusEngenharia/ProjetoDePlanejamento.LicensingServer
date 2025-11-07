@@ -30,7 +30,7 @@ builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE
 var app = builder.Build();
 app.UseCors();
 
-// ===== Private Key (preferir ENV no Railway) =====
+// ===== Private Key (PREFIRA ENV EM PRODUÇÃO) =====
 const string PrivateKeyPemFallback = @"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDKvnmTFVOLD9bM
 wXJ3GVOpG75OeF0zv6iwYAYK7HMlMpHARhrl/K7xAh5p1r1zrR1R83AxLUAPWvTE
@@ -60,7 +60,12 @@ zvu22nwtE+C8cPZZpJAgnWDCRpTRa9aodeOwl/zqJQIz9mPzkoOYTY7vSKvPCSVJ
 yNc0Sb1dO7dfmIYwz/t0cWy8
 -----END PRIVATE KEY-----";
 
-string PrivateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
+// Usa variável do Railway se existir; senão, o fallback acima
+var privateKeyPem = Environment.GetEnvironmentVariable("PRIVATE_KEY_PEM") ?? PrivateKeyPemFallback;
+
+// Corrige automaticamente casos de escape ou quebra de linha incorreta
+privateKeyPem = privateKeyPem.Replace("\\n", "\n").Trim();
+
 
 // ===== Assina payload com RS256 =====
 static string SignPayload(string privatePem, LicensePayload payload)
