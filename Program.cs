@@ -43,3 +43,13 @@ privateKeyPem = privateKeyPem
     .Replace("\\n", "\n")
     .Replace("\r\n", "\n")
     .Trim();
+// ===== Assina payload com RS256 =====
+static string SignPayload(string privatePem, LicensePayload payload)
+{
+    var json = JsonSerializer.Serialize(payload);
+    using var rsa = RSA.Create();
+    rsa.ImportFromPem(privatePem);
+    var sig = rsa.SignData(Encoding.UTF8.GetBytes(json), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+    return Convert.ToBase64String(sig);
+}
+
