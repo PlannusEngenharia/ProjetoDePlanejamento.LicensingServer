@@ -38,17 +38,19 @@ namespace ProjetoDePlanejamento.LicensingServer
                 _ => CreateNew(licenseKey, emailNorm, fingerprint),
                 // Atualizar existente
                 (_, existing) =>
-                {
-                    existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddDays(30);
-                    if (!string.IsNullOrWhiteSpace(emailNorm))
-                    {
-                        existing.Payload.Email = emailNorm;
-                        _keyByEmail[emailNorm!] = licenseKey;
-                    }
-                    if (!string.IsNullOrWhiteSpace(fingerprint))
-                        existing.Payload.Fingerprint = fingerprint;
-                    return existing;
-                });
+{
+    existing.Payload.SubscriptionStatus = "active";            // << ADICIONE ESTA LINHA
+    existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddDays(30);
+    if (!string.IsNullOrWhiteSpace(emailNorm))
+    {
+        existing.Payload.Email = emailNorm;
+        _keyByEmail[emailNorm!] = licenseKey;
+    }
+    if (!string.IsNullOrWhiteSpace(fingerprint))
+        existing.Payload.Fingerprint = fingerprint;
+    return existing;
+});
+
 
             return Task.FromResult<SignedLicense?>(lic);
         }
@@ -83,20 +85,17 @@ namespace ProjetoDePlanejamento.LicensingServer
                return Task.FromResult<SignedLicense?>(lic);
             return Task.FromResult<SignedLicense?>(null);
         }
-
-       public Task DeactivateAsync(string licenseKey)
-        {
-               _byKey.AddOrUpdate(
-                     licenseKey,
-                      _ => CreateNew(licenseKey, email: null, fingerprint: null, baseDays: 0), // cria já expirada
-                     (_, existing) =>
-        {
-            existing.Payload.SubscriptionStatus = "canceled";
-            existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5);
-            return existing;
-        });
+public Task DeactivateAsync(string licenseKey)
+{
+    if (_byKey.TryGetValue(licenseKey, out var existing))
+    {
+        existing.Payload.SubscriptionStatus = "canceled";
+        existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5);
+    }
+    // se não existir, não cria nada
     return Task.CompletedTask;
-        }
+}
+      
 
 
         // ===== Helpers =====
