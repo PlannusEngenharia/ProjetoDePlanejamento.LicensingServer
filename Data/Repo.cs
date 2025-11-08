@@ -10,7 +10,7 @@ namespace ProjetoDePlanejamento.LicensingServer
         Task<SignedLicense?> TryGetByKeyAsync(string licenseKey);
         Task DeactivateAsync(string licenseKey); // deixa expirada imediatamente
         Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int days);
-        Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint)
+        Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint);
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
@@ -74,6 +74,19 @@ namespace ProjetoDePlanejamento.LicensingServer
                 });
             return Task.CompletedTask;
         }
+            // helper específico para trial (não altera o CreateNew de licença)
+private static SignedLicense CreateTrial(string fingerprint, string? email, int days)
+    => new SignedLicense
+    {
+        Payload = new LicensePayload
+        {
+            Type = LicenseType.Trial,          // distingue de Subscription
+            SubscriptionStatus = "trial",
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(days),
+            Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant(),
+            Fingerprint = fingerprint
+        }
+    };
 
         public Task ProlongByEmailAsync(string email, TimeSpan delta)
         {
@@ -149,19 +162,7 @@ public Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? emai
 
     }
 
-    // helper específico para trial (não altera o CreateNew de licença)
-private static SignedLicense CreateTrial(string fingerprint, string? email, int days)
-    => new SignedLicense
-    {
-        Payload = new LicensePayload
-        {
-            Type = LicenseType.Trial,          // distingue de Subscription
-            SubscriptionStatus = "trial",
-            ExpiresAtUtc = DateTime.UtcNow.AddDays(days),
-            Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant(),
-            Fingerprint = fingerprint
-        }
-    };
+
 
     // Pequeno helper de extensão só pra deixar claro o "prolongamento" ao criar novo
     internal static class LicenseHelpers
