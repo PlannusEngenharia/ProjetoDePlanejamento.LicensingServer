@@ -77,6 +77,28 @@ namespace ProjetoDePlanejamento.LicensingServer
             return Task.CompletedTask;
         }
 
+        public Task<SignedLicense?> TryGetByKeyAsync(string licenseKey)
+       {
+             if (_byKey.TryGetValue(licenseKey, out var lic))
+               return Task.FromResult<SignedLicense?>(lic);
+            return Task.FromResult<SignedLicense?>(null);
+        }
+
+       public Task DeactivateAsync(string licenseKey)
+        {
+               _byKey.AddOrUpdate(
+                     licenseKey,
+                      _ => CreateNew(licenseKey, email: null, fingerprint: null, baseDays: 0), // cria já expirada
+                     (_, existing) =>
+        {
+            existing.Payload.SubscriptionStatus = "canceled";
+            existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5);
+            return existing;
+        });
+    return Task.CompletedTask;
+        }
+
+
         // ===== Helpers =====
         private static string? NormalizeEmail(string? email)
             => string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant();
