@@ -273,6 +273,41 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, Http
     return Results.Redirect(trialUrl, permanent: false);
 });
 
+// === VALIDATE ===
+app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
+        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
+
+    var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+    if (lic is null)
+        return Results.Ok(new { ok = false, error = "licenseKey não encontrada" });
+
+    var now = DateTime.UtcNow;
+    var active = lic.Payload.SubscriptionStatus?.Equals("active", StringComparison.OrdinalIgnoreCase) == true
+                 && lic.Payload.ExpiresAtUtc > now;
+
+    return Results.Ok(new
+    {
+        ok = active,
+        subscriptionStatus = lic.Payload.SubscriptionStatus,
+        expiresAtUtc = lic.Payload.ExpiresAtUtc,
+        email = lic.Payload.Email,
+        fingerprint = lic.Payload.Fingerprint
+    });
+});
+
+// === DEACTIVATE ===
+app.MapPost("/api/deactivate", async (DeactivateRequest req, ILicenseRepo repo) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
+        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
+
+    await repo.DeactivateAsync(req.LicenseKey!);
+    return Results.Ok(new { ok = true });
+});
+
+
 
 app.Run();
 
