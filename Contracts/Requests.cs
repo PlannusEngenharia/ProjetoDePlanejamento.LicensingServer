@@ -33,10 +33,13 @@ namespace ProjetoDePlanejamento.LicensingServer.Contracts
         public string? BuyerEmail { get; set; }
     }
      // /api/validate
+
     public sealed class ValidateRequest
     {
-        public string? LicenseKey { get; set; }
-        public string? Fingerprint { get; set; }
+        public string? LicenseKey { get; set; }   // opcional (se vier, valida como licença)
+        public string? Email { get; set; }        // opcional (telemetria/ajuda a vincular depois)
+        public string? Fingerprint { get; set; }  // obrigatório no fluxo de TRIAL
+        public string? AppVersion { get; set; }   // opcional
     }
 
     // /api/deactivate
