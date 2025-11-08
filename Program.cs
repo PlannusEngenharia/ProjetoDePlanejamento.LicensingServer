@@ -274,28 +274,57 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, Http
 });
 
 // === VALIDATE ===
+
 app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
 {
-    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
-        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
+    // ===== Fluxo 1: LICENÇA (se vier licenseKey, não muda sua lógica já aprovada) =====
+    if (!string.IsNullOrWhiteSpace(req.LicenseKey))
+    {
+        var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+        if (lic is null)
+            return Results.Ok(new { ok = false, reason = "license_not_found" });
 
-    var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
-    if (lic is null)
-        return Results.Ok(new { ok = false, error = "licenseKey não encontrada" });
+        var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
+                 && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
 
-    var now = DateTime.UtcNow;
-    var active = lic.Payload.SubscriptionStatus?.Equals("active", StringComparison.OrdinalIgnoreCase) == true
-                 && lic.Payload.ExpiresAtUtc > now;
+        // Assina (se ainda não tiver assinatura populada neste objeto)
+        // opcional: se você já assina no Issue/Renew, pode manter
+        // lic.SignatureBase64 ??= SignPayload(PrivateKeyPem, lic.Payload);
 
+        return Results.Ok(new
+        {
+            ok,
+            subscriptionStatus = lic.Payload.SubscriptionStatus, // "active" / "canceled"
+            expiresAtUtc = lic.Payload.ExpiresAtUtc,
+            email = lic.Payload.Email,
+            fingerprint = lic.Payload.Fingerprint
+        });
+    }
+
+    // ===== Fluxo 2: TRIAL (sem licenseKey, exige fingerprint) =====
+    if (string.IsNullOrWhiteSpace(req.Fingerprint))
+        return Results.BadRequest(new { error = "missing fingerprint for trial validation" });
+
+    // inicia (uma única vez) ou retorna o trial existente
+    var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
+
+    // assina o payload, igual às licenças
+    trial.SignatureBase64 = SignPayload(PrivateKeyPem, trial.Payload);
+
+    var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
     return Results.Ok(new
     {
-        ok = active,
-        subscriptionStatus = lic.Payload.SubscriptionStatus,
-        expiresAtUtc = lic.Payload.ExpiresAtUtc,
-        email = lic.Payload.Email,
-        fingerprint = lic.Payload.Fingerprint
+        ok = trialOk,
+        subscriptionStatus = trial.Payload.SubscriptionStatus, // "trial"
+        expiresAtUtc = trial.Payload.ExpiresAtUtc,
+        email = trial.Payload.Email,
+        fingerprint = trial.Payload.Fingerprint,
+
+        // limites sugeridos para o cliente respeitar:
+        features = new[] { "rows:max:30", "print:off" } // <- não mexe nos seus models
     });
 });
+
 
 // === DEACTIVATE ===
 app.MapPost("/api/deactivate", async (DeactivateRequest req, ILicenseRepo repo) =>
