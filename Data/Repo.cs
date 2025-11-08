@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using ProjetoDePlanejamento.LicensingServer.Contracts;
+
 
 namespace ProjetoDePlanejamento.LicensingServer
 {
