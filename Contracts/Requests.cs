@@ -32,4 +32,19 @@ namespace ProjetoDePlanejamento.LicensingServer.Contracts
         public string? LicenseKey { get; set; }
         public string? BuyerEmail { get; set; }
     }
+     // /api/validate
+    public sealed class ValidateRequest
+    {
+        public string? LicenseKey { get; set; }
+        public string? Fingerprint { get; set; }
+    }
+
+    // /api/deactivate
+    public sealed class DeactivateRequest
+    {
+        public string? LicenseKey { get; set; }
+        public string? Fingerprint { get; set; }
+        // opcional: motivo/log
+        public string? Reason { get; set; }
+    }
 }
