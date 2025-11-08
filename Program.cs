@@ -309,7 +309,7 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
     var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
 
     // assina o payload, igual às licenças
-    trial.SignatureBase64 = SignPayload(PrivateKeyPem, trial.Payload);
+    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload);
 
     var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
     return Results.Ok(new
