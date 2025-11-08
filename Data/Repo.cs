@@ -5,6 +5,10 @@ namespace ProjetoDePlanejamento.LicensingServer
         Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
         Task ProlongByKeyAsync(string licenseKey, TimeSpan delta);
         Task ProlongByEmailAsync(string email, TimeSpan delta);
+        
+        // NOVOS:
+        Task<SignedLicense?> TryGetByKeyAsync(string licenseKey);
+        Task DeactivateAsync(string licenseKey); // deixa expirada imediatamente
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
