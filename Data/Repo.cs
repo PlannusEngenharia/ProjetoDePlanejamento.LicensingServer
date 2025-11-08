@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace ProjetoDePlanejamento.LicensingServer
 {
     public interface ILicenseRepo
@@ -5,10 +7,10 @@ namespace ProjetoDePlanejamento.LicensingServer
         Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
         Task ProlongByKeyAsync(string licenseKey, TimeSpan delta);
         Task ProlongByEmailAsync(string email, TimeSpan delta);
-        
-        // NOVOS:
         Task<SignedLicense?> TryGetByKeyAsync(string licenseKey);
         Task DeactivateAsync(string licenseKey); // deixa expirada imediatamente
+        Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int days);
+        Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint)
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
@@ -16,6 +18,11 @@ namespace ProjetoDePlanejamento.LicensingServer
         private readonly HashSet<string> _validKeys;
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SignedLicense> _byKey = new();
         private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _keyByEmail = new();
+        private readonly ConcurrentDictionary<string, SignedLicense> _trialByFp = new();
+
+          // quantos dias de trial (opcional via ENV TRIAL_DAYS; padrão = 7)
+        public static int TrialDays =>
+            int.TryParse(Environment.GetEnvironmentVariable("TRIAL_DAYS"), out var d) && d > 0 ? d : 7;
 
         public InMemoryRepo(IEnumerable<string>? seedKeys)
         {
@@ -95,6 +102,29 @@ public Task DeactivateAsync(string licenseKey)
     // se não existir, não cria nada
     return Task.CompletedTask;
 }
+public Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint)
+{
+    if (string.IsNullOrWhiteSpace(fingerprint))
+        return Task.FromResult<SignedLicense?>(null);
+
+    return Task.FromResult(_trialByFp.TryGetValue(fingerprint, out var lic) ? lic : null);
+}
+
+public Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int days)
+{
+    if (string.IsNullOrWhiteSpace(fingerprint))
+        throw new ArgumentException("fingerprint required", nameof(fingerprint));
+
+    var lic = _trialByFp.AddOrUpdate(
+        fingerprint,
+        // cria trial uma única vez
+        _ => CreateTrial(fingerprint, email, days),
+        // se já existe, retorna como está (não reinicia o relógio do trial)
+        (_, existing) => existing
+    );
+
+    return Task.FromResult(lic);
+}
       
 
 
@@ -118,6 +148,20 @@ public Task DeactivateAsync(string licenseKey)
             };
 
     }
+
+    // helper específico para trial (não altera o CreateNew de licença)
+private static SignedLicense CreateTrial(string fingerprint, string? email, int days)
+    => new SignedLicense
+    {
+        Payload = new LicensePayload
+        {
+            Type = LicenseType.Trial,          // distingue de Subscription
+            SubscriptionStatus = "trial",
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(days),
+            Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant(),
+            Fingerprint = fingerprint
+        }
+    };
 
     // Pequeno helper de extensão só pra deixar claro o "prolongamento" ao criar novo
     internal static class LicenseHelpers
