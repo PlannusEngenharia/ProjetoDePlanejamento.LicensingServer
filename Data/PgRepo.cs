@@ -56,13 +56,17 @@ returning id, coalesce(email,''), coalesce(status,'active'), expires_at;";
                 cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@x", expires);
 
-                await using var rd = await cmd.ExecuteReaderAsync();
-                if (!await rd.ReadAsync()) return null;
+               await using var rd = await cmd.ExecuteReaderAsync();
+if (!await rd.ReadAsync()) return null;
 
-                licId     = rd.GetInt32(0);
-                retEmail  = rd.GetString(1);
-                retStatus = rd.GetString(2);
-                retExpires= rd.GetDateTime(3);
+licId     = rd.GetInt32(0);
+retEmail  = rd.GetString(1);
+retStatus = rd.GetString(2);
+retExpires= rd.GetDateTime(3);
+
+// ✅ fecha o reader antes de usar a conexão novamente
+await rd.CloseAsync();
+
             }
 
             // UPSERT em activations: se já existir (license_id,fingerprint) atualiza last_seen_at/status
