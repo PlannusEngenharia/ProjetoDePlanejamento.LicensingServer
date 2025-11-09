@@ -1,5 +1,6 @@
 using Npgsql;
 using System.Text.Json;
+using ProjetoDePlanejamento.LicensingServer.Contracts;
 
 namespace ProjetoDePlanejamento.LicensingServer.Data
 {
@@ -8,7 +9,7 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         private readonly string _cs;
         public PgRepo(string cs) => _cs = cs;
 
-        // --- DOWNLOADS ---
+        // --- logs de download ---
         public async Task LogDownloadAsync(string? ip, string? ua, string? referer)
         {
             await using var con = new NpgsqlConnection(_cs);
@@ -23,8 +24,8 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // --- LICENÇA: emitir/renovar ---
-        public async Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+        // --- cria ou renova licença ---
+        public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
         {
             var expires = DateTime.UtcNow.AddDays(30);
 
@@ -44,6 +45,7 @@ on conflict (license_key) do update
                 await cmd.ExecuteNonQueryAsync();
             }
 
+            // registra ativação simples
             var insAct = @"insert into activations (license_id,fingerprint,first_seen_at,last_seen_at,status)
                            values (@k,@f,now(),now(),'active');";
             await using (var cmd = new NpgsqlCommand(insAct, con))
@@ -53,7 +55,7 @@ on conflict (license_key) do update
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            return new LicenseResponse
+            return new SignedLicense
             {
                 Payload = new LicensePayload
                 {
@@ -66,8 +68,7 @@ on conflict (license_key) do update
             };
         }
 
-        // --- Buscar licença por chave ---
-        public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
+        public async Task<SignedLicense?> TryGetByKeyAsync(string licenseKey)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
@@ -86,7 +87,7 @@ on conflict (license_key) do update
             var status  = rd.IsDBNull(1) ? "inactive" : rd.GetString(1);
             var expires = rd.IsDBNull(2) ? DateTime.UtcNow.AddDays(-1) : rd.GetDateTime(2);
 
-            return new LicenseResponse
+            return new SignedLicense
             {
                 Payload = new LicensePayload
                 {
@@ -99,15 +100,15 @@ on conflict (license_key) do update
             };
         }
 
-        // --- Trial por fingerprint (cria se não existir) ---
-        public async Task<LicenseResponse> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
+        public async Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
+            // primeiro visto
+            DateTime? started = null;
             var find = @"select min(first_seen_at) from activations
                          where fingerprint=@f and status='trial';";
-            DateTime? started = null;
             await using (var cmd = new NpgsqlCommand(find, con))
             {
                 cmd.Parameters.AddWithValue("@f", fingerprint);
@@ -135,7 +136,7 @@ on conflict (license_key) do update
 
             var expires = started.Value.AddDays(trialDays);
 
-            return new LicenseResponse
+            return new SignedLicense
             {
                 Payload = new LicensePayload
                 {
@@ -148,20 +149,6 @@ on conflict (license_key) do update
             };
         }
 
-        // --- Cancelar licença ---
-        public async Task DeactivateAsync(string licenseKey)
-        {
-            await using var con = new NpgsqlConnection(_cs);
-            await con.OpenAsync();
-            var sql = @"update licenses
-                        set status='canceled', updated_at=now()
-                        where license_key=@k;";
-            await using var cmd = new NpgsqlCommand(sql, con);
-            cmd.Parameters.AddWithValue("@k", licenseKey);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        // --- Prolongar por e-mail (Hotmart) ---
         public async Task ProlongByEmailAsync(string email, TimeSpan delta)
         {
             await using var con = new NpgsqlConnection(_cs);
@@ -176,12 +163,23 @@ on conflict (license_key) do update
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // --- Log leve de webhook (reusa downloads) ---
-        public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
+        public async Task DeactivateAsync(string licenseKey)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
+            var sql = @"update licenses
+                        set status='canceled', updated_at=now()
+                        where license_key=@k;";
+            await using var cmd = new NpgsqlCommand(sql, con);
+            cmd.Parameters.AddWithValue("@k", licenseKey);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
+        {
+            await using var con = new NpgsqlConnection(_cs);
+            await con.OpenAsync();
             var sql = @"insert into downloads(ts, ip, ua, source, referer)
                         values (now(), 'webhook', @evt, 'hotmart', @em);";
             await using var cmd = new NpgsqlCommand(sql, con);
@@ -191,4 +189,5 @@ on conflict (license_key) do update
         }
     }
 }
+
 
