@@ -45,12 +45,14 @@ else
 var app = builder.Build();
 app.UseCors();
 
+// Program.cs
 var SigJson = new JsonSerializerOptions
 {
-    PropertyNamingPolicy = null, // PascalCase
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase, // <- camelCase
     DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     WriteIndented = false
 };
+
 
 // ======================================================================
 //  CHAVE PRIVADA (use ENV em produção)
