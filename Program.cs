@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,6 +31,13 @@ builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE
 
 var app = builder.Build();
 app.UseCors();
+
+var SigJson = new JsonSerializerOptions
+{
+    PropertyNamingPolicy = null, // PascalCase
+    DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+    WriteIndented = false
+};
 
 // ======================================================================
 //  CHAVE PRIVADA (use ENV em produção)
@@ -198,9 +206,9 @@ static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan 
     return false;
 }
 
-static string SignPayload(string privatePem, LicensePayload payload)
+static string SignPayload(string privatePem, LicensePayload payload, JsonSerializerOptions sigJson)
 {
-    var json = JsonSerializer.Serialize(payload);
+    var json = JsonSerializer.Serialize(payload, sigJson);
     using var rsa = RSA.Create();
     rsa.ImportFromPem(privatePem);
     var sig = rsa.SignData(Encoding.UTF8.GetBytes(json), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
