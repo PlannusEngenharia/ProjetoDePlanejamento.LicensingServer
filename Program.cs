@@ -29,7 +29,18 @@ builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
 
 // ===== Repositório em memória (seed de teste) =====
 //  -> Troque pelo seu repositório real quando conectar a um DB
-builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
+var cs = Environment.GetEnvironmentVariable("DATABASE_URL"); // pegue do Railway
+if (!string.IsNullOrWhiteSpace(cs))
+{
+    // Railway costuma entregar no formato postgres://user:pass@host:port/db
+    // Npgsql aceita esse formato. Se vier como postgresql://, também funciona.
+    builder.Services.AddSingleton<ILicenseRepo>(_ => new PgRepo(cs));
+}
+else
+{
+    builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
+}
+
 
 var app = builder.Build();
 app.UseCors();
@@ -254,11 +265,14 @@ app.MapGet("/download/demo", (HttpRequest req, HttpContext ctx) =>
     // Redireciona. 302 é suficiente aqui.
     return Results.Redirect(trialUrl, permanent: false);
 });
-app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, HttpContext ctx) =>
+app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req, HttpContext ctx, ILicenseRepo repo) =>
 {
     var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     var ua = req.Headers["User-Agent"].ToString();
-    Console.WriteLine($"[/download/demo] {req.Method} ip={ip} ua={ua}");
+    var referer = req.Headers["Referer"].ToString();
+
+    // grava no Postgres (tabela downloads)
+    await repo.LogDownloadAsync(ip, ua, string.IsNullOrWhiteSpace(referer) ? null : referer);
 
     var ual = ua.ToLowerInvariant();
     bool isMobile = ual.Contains("iphone") || ual.Contains("ipad") || ual.Contains("android");
@@ -267,14 +281,12 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, Http
     {
         var html = $"""
         <!doctype html><meta charset="utf-8">
-        <title>Baixar no computador</title>
+        <title>Baixe no computador</title>
         <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:680px;margin:48px auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;">
           <h2>Baixe no seu computador Windows</h2>
-          <p>Este instalador <b>(.exe)</b> só funciona no Windows.<br>
+          <p>Este instalador (.exe) só funciona no Windows.<br>
           Envie este link para seu e-mail ou abra no computador para baixar.</p>
-          <p style="margin-top:16px"><a href="{trialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">
-            Baixar instalador
-          </a></p>
+          <p style="margin-top:16px"><a href="{trialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
         </div>
         """;
         return Results.Content(html, "text/html; charset=utf-8");
@@ -282,6 +294,7 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, (HttpRequest req, Http
 
     return Results.Redirect(trialUrl, permanent: false);
 });
+
 
 // === VALIDATE ===
 
