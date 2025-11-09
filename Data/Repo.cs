@@ -2,17 +2,20 @@ using System.Collections.Concurrent;
 using ProjetoDePlanejamento.LicensingServer.Contracts;
 
 
-namespace ProjetoDePlanejamento.LicensingServer
+namespace ProjetoDePlanejamento.LicensingServer.Data
+
 {
-    public interface ILicenseRepo
+ public interface ILicenseRepo
     {
-        Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
-        Task ProlongByKeyAsync(string licenseKey, TimeSpan delta);
+        Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
+        Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey);
+        Task<LicenseResponse>  GetOrStartTrialAsync(string fingerprint, string? email, int trialDays);
         Task ProlongByEmailAsync(string email, TimeSpan delta);
-        Task<SignedLicense?> TryGetByKeyAsync(string licenseKey);
-        Task DeactivateAsync(string licenseKey); // deixa expirada imediatamente
-        Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int days);
-        Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint);
+        Task DeactivateAsync(string licenseKey);
+
+        // logs (no-op no InMemory)
+        Task LogDownloadAsync(string? ip, string? ua, string? referer);
+        Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw);
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
