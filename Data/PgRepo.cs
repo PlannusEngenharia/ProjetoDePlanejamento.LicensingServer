@@ -10,107 +10,86 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         private readonly string _cs;
         public PgRepo(string cs) => _cs = cs;
 
-        // ---------- helpers ----------
-        private static object DbVal(string? s) => (object?)s ?? DBNull.Value;
-        private static string? NormEmail(string? s)
-            => string.IsNullOrWhiteSpace(s) ? null : s.Trim().ToLowerInvariant();
-
-        private static string Truncate(string? s, int max)
-        {
-            if (string.IsNullOrEmpty(s)) return s ?? "";
-            return s.Length <= max ? s : s.Substring(0, max);
-        }
-
-        // ---------- logs: downloads ----------
+        // --- logs de download ---
         public async Task LogDownloadAsync(string? ip, string? ua, string? referer)
         {
-            try
-            {
-                await using var con = new NpgsqlConnection(_cs);
-                await con.OpenAsync();
+            await using var con = new NpgsqlConnection(_cs);
+            await con.OpenAsync();
 
-                // Protege contra varchar curto (se sua coluna não for TEXT)
-                var uaSafe = Truncate(ua, 512);
-                var rfSafe = Truncate(referer, 512);
+            const string sql = @"
+insert into downloads(ts, ip, ua, source, referer)
+values (now(), @ip, @ua, 'api', @rf);";
 
-                var sql = @"insert into downloads(ts, ip, ua, source, referer)
-                            values (now(), @ip, @ua, 'api', @rf);";
-                await using var cmd = new NpgsqlCommand(sql, con);
-                cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@ua", (object?)uaSafe ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@rf", (object?)rfSafe ?? DBNull.Value);
-                await cmd.ExecuteNonQueryAsync();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[PgRepo] LogDownloadAsync falhou: {ex.Message}");
-                // não propaga — log não pode derrubar request
-            }
+            await using var cmd = new NpgsqlCommand(sql, con);
+            cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ua", (object?)ua ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@rf", (object?)referer ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync();
         }
 
-        // ---------- cria/renova licença ----------
+        // --- cria ou renova licença ---
         public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
         {
-            // Se quiser validar key antes, consulte uma tabela/whitelist aqui
-            if (string.IsNullOrWhiteSpace(licenseKey))
-                return null;
-
             var expires = DateTime.UtcNow.AddDays(30);
-            var emailNorm = NormEmail(email);
 
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
-            // UPSERT em licenses
-            var upsert = @"
+            // UPSERT em licenses + retorna o id sempre
+            const string upsert = @"
 insert into licenses (license_key, email, status, expires_at, created_at, updated_at)
-values (@k,@e,'active',@x,now(),now())
+values (@k, @e, 'active', @x, now(), now())
 on conflict (license_key) do update
    set email = excluded.email,
        status = 'active',
-       expires_at = excluded.expires_at,
-       updated_at = now();";
+       expires_at = @x,
+       updated_at = now()
+returning id, coalesce(email,''), coalesce(status,'active'), expires_at;";
+
+            int licId;
+            string retEmail, retStatus;
+            DateTime retExpires;
+
             await using (var cmd = new NpgsqlCommand(upsert, con))
             {
                 cmd.Parameters.AddWithValue("@k", licenseKey);
-                cmd.Parameters.AddWithValue("@e", DbVal(emailNorm));
+                cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@x", expires);
-                await cmd.ExecuteNonQueryAsync();
+
+                await using var rd = await cmd.ExecuteReaderAsync();
+                if (!await rd.ReadAsync()) return null;
+
+                licId     = rd.GetInt32(0);
+                retEmail  = rd.GetString(1);
+                retStatus = rd.GetString(2);
+                retExpires= rd.GetDateTime(3);
             }
 
-            // UPSERT “leve” em activations por (license_id,fingerprint) se você tiver unique;
-            // se não tiver unique, ainda assim evitamos duplicar com on conflict do id artificial.
-            var insAct = @"
+            // UPSERT em activations: se já existir (license_id,fingerprint) atualiza last_seen_at/status
+            const string upsertAct = @"
 insert into activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
-values (@k, @f, now(), now(), 'active')
-on conflict do nothing;";
-            await using (var cmd = new NpgsqlCommand(insAct, con))
+values (@lid, @fp, now(), now(), 'active')
+on conflict (license_id, fingerprint) do update
+   set last_seen_at = now(),
+       status      = 'active';";
+
+            await using (var cmd = new NpgsqlCommand(upsertAct, con))
             {
-                cmd.Parameters.AddWithValue("@k", licenseKey);
-                cmd.Parameters.AddWithValue("@f", DbVal(fingerprint));
+                cmd.Parameters.AddWithValue("@lid", licId);
+                cmd.Parameters.AddWithValue("@fp", (object?)fingerprint ?? DBNull.Value);
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            // Sempre atualiza last_seen
-            var touch = @"update activations
-                            set last_seen_at = now(), status='active'
-                          where license_id=@k and (@f is null or fingerprint=@f);";
-            await using (var cmd = new NpgsqlCommand(touch, con))
-            {
-                cmd.Parameters.AddWithValue("@k", licenseKey);
-                cmd.Parameters.AddWithValue("@f", DbVal(fingerprint));
-                await cmd.ExecuteNonQueryAsync();
-            }
-
+            // monta o objeto de retorno
             return new SignedLicense
             {
                 Payload = new LicensePayload
                 {
-                    LicenseId = licenseKey,
-                    Email = emailNorm ?? "",
-                    Fingerprint = fingerprint ?? "",
-                    ExpiresAtUtc = expires,
-                    SubscriptionStatus = "active"
+                    LicenseId          = licenseKey,
+                    Email              = retEmail,
+                    Fingerprint        = fingerprint ?? "",
+                    ExpiresAtUtc       = retExpires,
+                    SubscriptionStatus = retStatus
                 }
             };
         }
@@ -120,73 +99,63 @@ on conflict do nothing;";
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
-            var sql = @"select email, status, expires_at
-                        from licenses
-                        where license_key=@k
-                        limit 1;";
+            const string sql = @"
+select coalesce(email,''), coalesce(status,'inactive'), coalesce(expires_at, now() - interval '1 day')
+from licenses
+where license_key=@k
+limit 1;";
+
             await using var cmd = new NpgsqlCommand(sql, con);
             cmd.Parameters.AddWithValue("@k", licenseKey);
 
             await using var rd = await cmd.ExecuteReaderAsync();
             if (!await rd.ReadAsync()) return null;
 
-            var email   = rd.IsDBNull(0) ? "" : rd.GetString(0);
-            var status  = rd.IsDBNull(1) ? "inactive" : rd.GetString(1);
-            var expires = rd.IsDBNull(2) ? DateTime.UtcNow.AddDays(-1) : rd.GetDateTime(2);
+            var email   = rd.GetString(0);
+            var status  = rd.GetString(1);
+            var expires = rd.GetDateTime(2);
 
             return new SignedLicense
             {
                 Payload = new LicensePayload
                 {
-                    LicenseId = licenseKey,
-                    Email = email,
-                    Fingerprint = "",
-                    ExpiresAtUtc = expires,
+                    LicenseId          = licenseKey,
+                    Email              = email,
+                    Fingerprint        = "",
+                    ExpiresAtUtc       = expires,
                     SubscriptionStatus = status
                 }
             };
         }
 
-        // ---------- trial ----------
         public async Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
         {
-            if (string.IsNullOrWhiteSpace(fingerprint))
-                throw new ArgumentException("fingerprint required", nameof(fingerprint));
-
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
+            // Se já houver ativação trial para esse fingerprint, pega o primeiro visto
             DateTime? started = null;
-            var find = @"select min(first_seen_at) from activations
-                         where fingerprint=@f and status='trial';";
+            const string find = @"select min(first_seen_at) from activations where fingerprint=@f and status='trial';";
             await using (var cmd = new NpgsqlCommand(find, con))
             {
                 cmd.Parameters.AddWithValue("@f", fingerprint);
                 var o = await cmd.ExecuteScalarAsync();
-                if (o is DateTime dt) started = dt;
+                if (o != null && o != DBNull.Value) started = (DateTime)o;
             }
 
             if (started is null)
             {
-                var ins = @"insert into activations
-                            (license_id, fingerprint, machine_name, client_version, ip, first_seen_at, last_seen_at, status)
-                            values ('TRIAL', @f, null, null, null, now(), now(), 'trial')
-                            on conflict do nothing;";
-                await using var cmd = new NpgsqlCommand(ins, con)
-                {
-                    Parameters =
-                    {
-                        new("@f", fingerprint)
-                    }
-                };
+                const string ins = @"
+insert into activations(license_id,fingerprint,machine_name,client_version,ip,first_seen_at,last_seen_at,status)
+values (0, @f, null, null, null, now(), now(), 'trial');";
+                await using var cmd = new NpgsqlCommand(ins, con);
+                cmd.Parameters.AddWithValue("@f", fingerprint);
                 await cmd.ExecuteNonQueryAsync();
                 started = DateTime.UtcNow;
             }
             else
             {
-                var upd = @"update activations
-                            set last_seen_at=now()
-                            where fingerprint=@f and status='trial';";
+                const string upd = @"update activations set last_seen_at=now() where fingerprint=@f and status='trial';";
                 await using var cmd = new NpgsqlCommand(upd, con);
                 cmd.Parameters.AddWithValue("@f", fingerprint);
                 await cmd.ExecuteNonQueryAsync();
@@ -198,10 +167,10 @@ on conflict do nothing;";
             {
                 Payload = new LicensePayload
                 {
-                    LicenseId = "TRIAL",
-                    Email = NormEmail(email) ?? "",
-                    Fingerprint = fingerprint,
-                    ExpiresAtUtc = expires,
+                    LicenseId          = "TRIAL",
+                    Email              = email ?? "",
+                    Fingerprint        = fingerprint,
+                    ExpiresAtUtc       = expires,
                     SubscriptionStatus = "trial"
                 }
             };
@@ -212,11 +181,14 @@ on conflict do nothing;";
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
-            var sql = @"update licenses
-                           set expires_at = coalesce(expires_at, now()) + @d, updated_at=now()
-                         where email=@e;";
+            const string sql = @"
+update licenses
+   set expires_at = coalesce(expires_at, now()) + @d, updated_at = now()
+ where email = @e;";
+
             await using var cmd = new NpgsqlCommand(sql, con);
-            cmd.Parameters.AddWithValue("@e", NormEmail(email) ?? "");
+            cmd.Parameters.AddWithValue("@e", email);
+            // tipa como interval para o Postgres
             cmd.Parameters.Add("@d", NpgsqlDbType.Interval).Value = delta;
             await cmd.ExecuteNonQueryAsync();
         }
@@ -226,38 +198,29 @@ on conflict do nothing;";
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
-            var sql = @"update licenses
-                        set status='canceled', updated_at=now()
-                        where license_key=@k;";
+            const string sql = @"update licenses set status='canceled', updated_at=now() where license_key=@k;";
             await using var cmd = new NpgsqlCommand(sql, con);
             cmd.Parameters.AddWithValue("@k", licenseKey);
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // ---------- logs: webhook ----------
         public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
         {
-            try
-            {
-                await using var con = new NpgsqlConnection(_cs);
-                await con.OpenAsync();
+            await using var con = new NpgsqlConnection(_cs);
+            await con.OpenAsync();
 
-                // Reuso da tabela downloads para “ping” do webhook (como você fez)
-                var sql = @"insert into downloads(ts, ip, ua, source, referer)
-                            values (now(), 'webhook', @evt, 'hotmart', @em);";
-                await using var cmd = new NpgsqlCommand(sql, con);
-                cmd.Parameters.AddWithValue("@evt", DbVal(Truncate(evt, 128)));
-                cmd.Parameters.AddWithValue("@em", DbVal(Truncate(email, 256)));
-                await cmd.ExecuteNonQueryAsync();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[PgRepo] LogWebhookAsync falhou: {ex.Message}");
-                // não propaga
-            }
+            const string sql = @"
+insert into downloads(ts, ip, ua, source, referer)
+values (now(), 'webhook', @evt, 'hotmart', @em);";
+
+            await using var cmd = new NpgsqlCommand(sql, con);
+            cmd.Parameters.AddWithValue("@evt", (object?)evt ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@em",  (object?)email ?? DBNull.Value);
+            await cmd.ExecuteNonQueryAsync();
         }
     }
 }
+
 
 
 
