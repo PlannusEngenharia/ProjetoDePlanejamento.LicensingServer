@@ -50,10 +50,12 @@ app.UseCors();
 // Program.cs
 var SigJson = new JsonSerializerOptions
 {
-    PropertyNamingPolicy = null, // <-- PascalCase para casar com o cliente
+-   PropertyNamingPolicy = null, // <-- PascalCase para casar com o cliente
++   PropertyNamingPolicy = JsonNamingPolicy.CamelCase, // <-- TEM que ser camelCase
     DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     WriteIndented = false
 };
+
 
 
 
