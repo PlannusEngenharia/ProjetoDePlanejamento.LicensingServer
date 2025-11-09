@@ -1,11 +1,11 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using ProjetoDePlanejamento.LicensingServer.Contracts;
 
-
 namespace ProjetoDePlanejamento.LicensingServer.Data
-
 {
- public interface ILicenseRepo
+    // Contrato único que Program.cs injeta (PgRepo e InMemoryRepo implementam)
+    public interface ILicenseRepo
     {
         Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
         Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey);
@@ -13,170 +13,110 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         Task ProlongByEmailAsync(string email, TimeSpan delta);
         Task DeactivateAsync(string licenseKey);
 
-        // logs (no-op no InMemory)
+        // logs (no-op no InMemory; PgRepo grava no Postgres)
         Task LogDownloadAsync(string? ip, string? ua, string? referer);
         Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw);
     }
 
+    // Implementação em memória (fallback local / DEV)
     public sealed class InMemoryRepo : ILicenseRepo
     {
         private readonly HashSet<string> _validKeys;
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SignedLicense> _byKey = new();
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _keyByEmail = new();
-        private readonly ConcurrentDictionary<string, SignedLicense> _trialByFp = new();
+        private readonly ConcurrentDictionary<string, LicenseResponse> _byKey = new();
+        private readonly ConcurrentDictionary<string, string> _keyByEmail = new();
+        private readonly ConcurrentDictionary<string, LicenseResponse> _trialByFp = new();
 
-          // quantos dias de trial (opcional via ENV TRIAL_DAYS; padrão = 7)
+        // dias de trial (pode sobrescrever via ENV TRIAL_DAYS)
         public static int TrialDays =>
             int.TryParse(Environment.GetEnvironmentVariable("TRIAL_DAYS"), out var d) && d > 0 ? d : 7;
 
         public InMemoryRepo(IEnumerable<string>? seedKeys)
         {
-            // seeds defensivos (ignora nulos/vazios/whitespace)
-            _validKeys = new HashSet<string>(
-                (seedKeys ?? Array.Empty<string>()).Where(s => !string.IsNullOrWhiteSpace(s))
-            );
+            _validKeys = new HashSet<string>((seedKeys ?? Array.Empty<string>())
+                .Where(s => !string.IsNullOrWhiteSpace(s)));
         }
 
-        public Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+        public Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
         {
             if (string.IsNullOrWhiteSpace(licenseKey) || !_validKeys.Contains(licenseKey))
-                return Task.FromResult<SignedLicense?>(null);
+                return Task.FromResult<LicenseResponse?>(null);
 
-            string? emailNorm = NormalizeEmail(email);
+            var emailNorm = NormalizeEmail(email);
 
             var lic = _byKey.AddOrUpdate(
                 licenseKey,
-                // Criar novo
-                _ => CreateNew(licenseKey, emailNorm, fingerprint),
-                // Atualizar existente
-                (_, existing) =>
-{
-    existing.Payload.SubscriptionStatus = "active";            // << ADICIONE ESTA LINHA
-    existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddDays(30);
-    if (!string.IsNullOrWhiteSpace(emailNorm))
-    {
-        existing.Payload.Email = emailNorm;
-        _keyByEmail[emailNorm!] = licenseKey;
-    }
-    if (!string.IsNullOrWhiteSpace(fingerprint))
-        existing.Payload.Fingerprint = fingerprint;
-    return existing;
-});
-
-
-            return Task.FromResult<SignedLicense?>(lic);
-        }
-
-        public Task ProlongByKeyAsync(string licenseKey, TimeSpan delta)
-        {
-            _byKey.AddOrUpdate(
-                licenseKey,
-                _ => CreateNew(licenseKey, email: null, fingerprint: null, baseDays: 30).WithProlong(delta),
+                _ => Create(licenseKey, emailNorm, fingerprint, days: 30, status: "active"),
                 (_, existing) =>
                 {
-                    existing.Payload.ExpiresAtUtc = existing.Payload.ExpiresAtUtc.Add(delta);
+                    existing.Payload.SubscriptionStatus = "active";
+                    existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddDays(30);
+                    if (!string.IsNullOrWhiteSpace(emailNorm))
+                    {
+                        existing.Payload.Email = emailNorm;
+                        _keyByEmail[emailNorm!] = licenseKey;
+                    }
+                    if (!string.IsNullOrWhiteSpace(fingerprint))
+                        existing.Payload.Fingerprint = fingerprint;
                     return existing;
                 });
-            return Task.CompletedTask;
-        }
-            // helper específico para trial (não altera o CreateNew de licença)
 
+            return Task.FromResult<LicenseResponse?>(lic);
+        }
+
+        public Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
+            => Task.FromResult(_byKey.TryGetValue(licenseKey, out var lic) ? lic : null);
+
+        public Task<LicenseResponse> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
+        {
+            if (string.IsNullOrWhiteSpace(fingerprint))
+                throw new ArgumentException("fingerprint required", nameof(fingerprint));
+
+            var lic = _trialByFp.GetOrAdd(
+                fingerprint,
+                _ => Create("TRIAL", NormalizeEmail(email), fingerprint, days: trialDays, status: "trial"));
+
+            return Task.FromResult(lic);
+        }
 
         public Task ProlongByEmailAsync(string email, TimeSpan delta)
         {
-            if (string.IsNullOrWhiteSpace(email)) return Task.CompletedTask;
-
-            var emailNorm = NormalizeEmail(email)!;
-            if (_keyByEmail.TryGetValue(emailNorm, out var key))
-                return ProlongByKeyAsync(key, delta);
+            var e = NormalizeEmail(email);
+            if (e != null && _keyByEmail.TryGetValue(e, out var key) && _byKey.TryGetValue(key, out var lic))
+                lic.Payload.ExpiresAtUtc = lic.Payload.ExpiresAtUtc.Add(delta);
 
             return Task.CompletedTask;
         }
 
-        public Task<SignedLicense?> TryGetByKeyAsync(string licenseKey)
-       {
-             if (_byKey.TryGetValue(licenseKey, out var lic))
-               return Task.FromResult<SignedLicense?>(lic);
-            return Task.FromResult<SignedLicense?>(null);
+        public Task DeactivateAsync(string licenseKey)
+        {
+            if (_byKey.TryGetValue(licenseKey, out var lic))
+            {
+                lic.Payload.SubscriptionStatus = "canceled";
+                lic.Payload.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5);
+            }
+            return Task.CompletedTask;
         }
-public Task DeactivateAsync(string licenseKey)
-{
-    if (_byKey.TryGetValue(licenseKey, out var existing))
-    {
-        existing.Payload.SubscriptionStatus = "canceled";
-        existing.Payload.ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5);
-    }
-    // se não existir, não cria nada
-    return Task.CompletedTask;
-}
-public Task<SignedLicense?> TryGetTrialByFingerprintAsync(string fingerprint)
-{
-    if (string.IsNullOrWhiteSpace(fingerprint))
-        return Task.FromResult<SignedLicense?>(null);
 
-    return Task.FromResult(_trialByFp.TryGetValue(fingerprint, out var lic) ? lic : null);
-}
-
-public Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int days)
-{
-    if (string.IsNullOrWhiteSpace(fingerprint))
-        throw new ArgumentException("fingerprint required", nameof(fingerprint));
-
-    var lic = _trialByFp.AddOrUpdate(
-        fingerprint,
-        // cria trial uma única vez
-        _ => CreateTrial(fingerprint, email, days),
-        // se já existe, retorna como está (não reinicia o relógio do trial)
-        (_, existing) => existing
-    );
-
-    return Task.FromResult(lic);
-}
-      
-
+        // ===== Logs (no-op aqui; PgRepo implementa gravando no DB) =====
+        public Task LogDownloadAsync(string? ip, string? ua, string? referer) => Task.CompletedTask;
+        public Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw) => Task.CompletedTask;
 
         // ===== Helpers =====
         private static string? NormalizeEmail(string? email)
             => string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant();
 
-        private static SignedLicense CreateNew(string licenseKey, string? email, string? fingerprint, int baseDays = 30)
-            => new SignedLicense
+        private static LicenseResponse Create(string licenseId, string? email, string? fingerprint, int days, string status)
+            => new LicenseResponse
             {
                 Payload = new LicensePayload
                 {
-                    Type = LicenseType.Subscription,
-                    SubscriptionStatus = "active",
-                    ExpiresAtUtc = DateTime.UtcNow.AddDays(baseDays),
-                    Email = email,
-                    Fingerprint = fingerprint,
-                    // opcional: atribuir um LicenseId se seu modelo tiver
-                    // LicenseId = licenseKey
+                    LicenseId = licenseId,
+                    Email = email ?? "",
+                    Fingerprint = fingerprint ?? "",
+                    ExpiresAtUtc = DateTime.UtcNow.AddDays(days),
+                    SubscriptionStatus = status
                 }
             };
-            private static SignedLicense CreateTrial(string fingerprint, string? email, int days)
-    => new SignedLicense
-    {
-        Payload = new LicensePayload
-        {
-            Type = LicenseType.Trial,          // distingue de Subscription
-            SubscriptionStatus = "trial",
-            ExpiresAtUtc = DateTime.UtcNow.AddDays(days),
-            Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim().ToLowerInvariant(),
-            Fingerprint = fingerprint
-        }
-    };
-
-    }
-
-
-
-    // Pequeno helper de extensão só pra deixar claro o "prolongamento" ao criar novo
-    internal static class LicenseHelpers
-    {
-        public static SignedLicense WithProlong(this SignedLicense lic, TimeSpan delta)
-        {
-            lic.Payload.ExpiresAtUtc = lic.Payload.ExpiresAtUtc.Add(delta);
-            return lic;
-        }
     }
 }
+
