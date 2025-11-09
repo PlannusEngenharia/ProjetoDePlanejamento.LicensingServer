@@ -8,17 +8,19 @@ public sealed class PgRepo : ILicenseRepo
 
     // --- registra download ---
     public async Task LogDownloadAsync(string? ip, string? ua, string? referer)
-    {
-        await using var con = new NpgsqlConnection(_cs);
-        await con.OpenAsync();
+{
+    await using var con = new NpgsqlConnection(_cs);
+    await con.OpenAsync();
 
-        var sql = "insert into downloads(ts, ip, ua, referer) values (now(), @ip, @ua, @rf);";
-        await using var cmd = new NpgsqlCommand(sql, con);
-        cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@ua", (object?)ua ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@rf", (object?)referer ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync();
-    }
+    var sql = "insert into downloads(ts, ip, ua, source, referer) values (now(), @ip, @ua, @src, @rf);";
+    await using var cmd = new NpgsqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@ua", (object?)ua ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@src", "api"); // marque a origem
+    cmd.Parameters.AddWithValue("@rf", (object?)referer ?? DBNull.Value);
+    await cmd.ExecuteNonQueryAsync();
+}
+
 
     // --- cria ou renova licença ---
     public async Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
