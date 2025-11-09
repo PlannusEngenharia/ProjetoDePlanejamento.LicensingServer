@@ -29,17 +29,19 @@ builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
 
 // ===== Repositório em memória (seed de teste) =====
 //  -> Troque pelo seu repositório real quando conectar a um DB
-var cs = Environment.GetEnvironmentVariable("DATABASE_URL"); // pegue do Railway
+var cs = Environment.GetEnvironmentVariable("DATABASE_URL");
+
 if (!string.IsNullOrWhiteSpace(cs))
 {
-    // Railway costuma entregar no formato postgres://user:pass@host:port/db
-    // Npgsql aceita esse formato. Se vier como postgresql://, também funciona.
-    builder.Services.AddSingleton<ILicenseRepo>(_ => new PgRepo(cs));
+    // Converta a URL do Railway para uma connection string Npgsql
+    var pg = BuildPgConnectionString(cs);
+    builder.Services.AddSingleton<ILicenseRepo>(_ => new PgRepo(pg));
 }
 else
 {
     builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
 }
+
 
 
 var app = builder.Build();
@@ -48,10 +50,11 @@ app.UseCors();
 // Program.cs
 var SigJson = new JsonSerializerOptions
 {
-    PropertyNamingPolicy = JsonNamingPolicy.CamelCase, // <- camelCase
+    PropertyNamingPolicy = null, // <-- PascalCase para casar com o cliente
     DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     WriteIndented = false
 };
+
 
 
 // ======================================================================
