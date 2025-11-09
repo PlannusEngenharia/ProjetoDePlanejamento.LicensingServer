@@ -1,13 +1,15 @@
 using Npgsql;
 using System.Text.Json;
 
-public sealed class PgRepo : ILicenseRepo
+namespace ProjetoDePlanejamento.LicensingServer.Data
 {
-    private readonly string _cs;
-    public PgRepo(string cs) => _cs = cs;
+    public sealed class PgRepo : ILicenseRepo
+    {
+        private readonly string _cs;
+        public PgRepo(string cs) => _cs = cs;
 
-    // --- registra download ---
-    public async Task LogDownloadAsync(string? ip, string? ua, string? referer)
+        // --- DOWNLOADS ---
+        public async Task LogDownloadAsync(string? ip, string? ua, string? referer)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
@@ -21,9 +23,8 @@ public sealed class PgRepo : ILicenseRepo
             await cmd.ExecuteNonQueryAsync();
         }
 
-
-    // --- cria ou renova licença ---
-    public async Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+        // --- LICENÇA: emitir/renovar ---
+        public async Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
         {
             var expires = DateTime.UtcNow.AddDays(30);
 
@@ -65,35 +66,8 @@ on conflict (license_key) do update
             };
         }
 
-    // --- prolonga via webhook ---
-    public async Task ProlongByEmailAsync(string email, TimeSpan delta)
-    {
-        await using var con = new NpgsqlConnection(_cs);
-        await con.OpenAsync();
-
-        var sql = @"update licenses
-                       set expires_at = coalesce(expires_at, now()) + @d, updated_at=now()
-                     where email=@e;";
-        await using var cmd = new NpgsqlCommand(sql, con);
-        cmd.Parameters.AddWithValue("@e", email);
-        cmd.Parameters.AddWithValue("@d", delta);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    // --- placeholder para logs de webhook ---
-    public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
-{
-    await using var con = new NpgsqlConnection(_cs);
-    await con.OpenAsync();
-
-    var sql = @"insert into downloads(ts, ip, ua, source, referer)
-                values (now(), 'webhook', @evt, 'hotmart', @em);";
-    await using var cmd = new NpgsqlCommand(sql, con);
-    cmd.Parameters.AddWithValue("@evt", (object?)evt ?? DBNull.Value);
-    cmd.Parameters.AddWithValue("@em", (object?)email ?? DBNull.Value);
-    await cmd.ExecuteNonQueryAsync();
-}
-public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
+        // --- Buscar licença por chave ---
+        public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
@@ -118,22 +92,20 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
                 {
                     LicenseId = licenseKey,
                     Email = email,
-                    Fingerprint = "", // opcional aqui
+                    Fingerprint = "",
                     ExpiresAtUtc = expires,
                     SubscriptionStatus = status
                 }
             };
         }
 
-        // Trial por fingerprint (cria se não existir)
+        // --- Trial por fingerprint (cria se não existir) ---
         public async Task<LicenseResponse> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
 
-            // Verifica se já existe ativação 'trial' para essa máquina
-            var find = @"select min(first_seen_at) as started
-                         from activations
+            var find = @"select min(first_seen_at) from activations
                          where fingerprint=@f and status='trial';";
             DateTime? started = null;
             await using (var cmd = new NpgsqlCommand(find, con))
@@ -145,7 +117,6 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
 
             if (started is null)
             {
-                // cria um registro de trial
                 var ins = @"insert into activations(license_id,fingerprint,machine_name,client_version,ip,first_seen_at,last_seen_at,status)
                             values ('TRIAL', @f, null, null, null, now(), now(), 'trial');";
                 await using var cmd = new NpgsqlCommand(ins, con);
@@ -155,7 +126,6 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
             }
             else
             {
-                // atualiza "last_seen_at"
                 var upd = @"update activations set last_seen_at=now()
                             where fingerprint=@f and status='trial';";
                 await using var cmd = new NpgsqlCommand(upd, con);
@@ -178,7 +148,7 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
             };
         }
 
-        // Cancelar licença
+        // --- Cancelar licença ---
         public async Task DeactivateAsync(string licenseKey)
         {
             await using var con = new NpgsqlConnection(_cs);
@@ -191,7 +161,7 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // Hotmart: prolongamento
+        // --- Prolongar por e-mail (Hotmart) ---
         public async Task ProlongByEmailAsync(string email, TimeSpan delta)
         {
             await using var con = new NpgsqlConnection(_cs);
@@ -206,11 +176,12 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // Log bruto do webhook (aqui reutilizo downloads como “log leve”)
+        // --- Log leve de webhook (reusa downloads) ---
         public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
         {
             await using var con = new NpgsqlConnection(_cs);
             await con.OpenAsync();
+
             var sql = @"insert into downloads(ts, ip, ua, source, referer)
                         values (now(), 'webhook', @evt, 'hotmart', @em);";
             await using var cmd = new NpgsqlCommand(sql, con);
@@ -218,6 +189,6 @@ public async Task<LicenseResponse?> TryGetByKeyAsync(string licenseKey)
             cmd.Parameters.AddWithValue("@em", (object?)email ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync();
         }
-    
-
+    }
 }
+
