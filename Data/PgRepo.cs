@@ -83,14 +83,16 @@ on conflict (license_key) do update
 
     // --- placeholder para logs de webhook ---
     public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
-    {
-        await using var con = new NpgsqlConnection(_cs);
-        await con.OpenAsync();
-        var sql = @"insert into downloads(ts, ip, ua, referer)
-                    values (now(), 'webhook', @evt, @em);";
-        await using var cmd = new NpgsqlCommand(sql, con);
-        cmd.Parameters.AddWithValue("@evt", (object?)evt ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@em", (object?)email ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync();
-    }
+{
+    await using var con = new NpgsqlConnection(_cs);
+    await con.OpenAsync();
+
+    var sql = @"insert into downloads(ts, ip, ua, source, referer)
+                values (now(), 'webhook', @evt, 'hotmart', @em);";
+    await using var cmd = new NpgsqlCommand(sql, con);
+    cmd.Parameters.AddWithValue("@evt", (object?)evt ?? DBNull.Value);
+    cmd.Parameters.AddWithValue("@em", (object?)email ?? DBNull.Value);
+    await cmd.ExecuteNonQueryAsync();
+}
+
 }
