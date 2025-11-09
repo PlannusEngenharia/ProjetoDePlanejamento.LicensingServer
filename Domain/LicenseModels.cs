@@ -1,20 +1,32 @@
 namespace ProjetoDePlanejamento.LicensingServer
 {
-    public enum LicenseType { Subscription, Trial, Demo }
+    public enum LicenseType { Trial = 0, Subscription = 1 }
 
     public sealed class LicensePayload
-    {
-        public string LicenseId { get; set; } = Guid.NewGuid().ToString("N");
-        public LicenseType Type { get; set; } = LicenseType.Subscription;
-        public string SubscriptionStatus { get; set; } = "active";
-        public DateTime ExpiresAtUtc { get; set; } = DateTime.UtcNow.AddDays(30);
-        public string? Email { get; set; }
-        public string? Fingerprint { get; set; }
-    }
+{
+    public string? LicenseKey { get; set; }
+    public string? LicenseId { get; set; }
+    public string? PlanId { get; set; }
 
-    public sealed class SignedLicense
-    {
-        public LicensePayload Payload { get; set; } = new();
-        public string SignatureBase64 { get; set; } = "";
-    }
+    public string? CustomerName { get; set; }
+    public string? CustomerEmail { get; set; }
+
+    public LicenseType Type { get; set; } = LicenseType.Trial;
+    public string SubscriptionStatus { get; set; } = "trial";
+    public int MaxMachines { get; set; } = 1;
+
+    public string? Email { get; set; }
+    public string? Fingerprint { get; set; }
+
+    public DateTime IssuedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime ExpiresAtUtc { get; set; }
+
+    public List<string> Features { get; set; } = new();
+}
+
+public sealed class SignedLicense
+{
+    public LicensePayload Payload { get; set; } = new();
+    public string SignatureBase64 { get; set; } = "";
+}
 }
