@@ -110,7 +110,7 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, Http
     if (lic is null)
         return Results.BadRequest(new { error = "licenseKey inválida" });
 
-    lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload);
+    lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
     return Results.Ok(lic);
 });
 
@@ -317,7 +317,7 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
     var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
 
     // assina o payload, igual às licenças
-    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload);
+    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
 
     var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
     return Results.Ok(new
