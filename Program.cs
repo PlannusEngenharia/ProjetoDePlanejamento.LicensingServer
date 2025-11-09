@@ -219,9 +219,9 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 // ===== Helpers =====
 static string BuildPgConnectionString(string databaseUrl)
 {
-    // Aceita postgres:// ou postgresql://
-    var uri = new Uri(databaseUrl);
+    var uri = new Uri(databaseUrl); // aceita postgres:// e postgresql://
     var userInfo = uri.UserInfo.Split(':', 2);
+
     var builder = new Npgsql.NpgsqlConnectionStringBuilder
     {
         Host = uri.Host,
@@ -229,13 +229,15 @@ static string BuildPgConnectionString(string databaseUrl)
         Database = uri.AbsolutePath.Trim('/'),
         Username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "",
         Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "",
-        SslMode = Npgsql.SslMode.Require,
-        TrustServerCertificate = true,
+        SslMode = Npgsql.SslMode.Require,   // Railway normalmente exige SSL
         Pooling = true,
-        MaximumPoolSize = 20
+        MaxPoolSize = 20                    // <- nome correto
+        // TrustServerCertificate = true   // REMOVER: obsoleto e inútil
     };
+
     return builder.ToString();
 }
+
 
 
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
