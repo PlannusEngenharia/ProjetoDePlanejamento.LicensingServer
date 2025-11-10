@@ -165,9 +165,11 @@ app.MapPost("/api/check", (HttpRequest _) =>
 });
 
 // ===== Webhook Hotmart (v2) =====
+// ===============================================
+// WEBHOOK HOTMART
+// ===============================================
 app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Valida HOTTOK
     var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
     string? got =
         req.Headers["hottok"].FirstOrDefault()
@@ -178,7 +180,6 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
         return Results.Unauthorized();
 
-    // 2) Extrai campos relevantes
     var root = body.RootElement;
 
     string? evt =
@@ -207,7 +208,6 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
         e.Contains("canceled") || e.Contains("cancel") ||
         e.Contains("chargeback");
 
-    // 3) Aplica ação por tipo de evento
     TimeSpan delta =
         isRenew ? TimeSpan.FromDays(30) :
         isCancel ? TimeSpan.FromDays(-3650) :
@@ -217,56 +217,34 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     {
         if (isRenew)
         {
-            await EnsureLicenseForEmailAsync(repo, email!, TimeSpan.FromDays(30));
+            await EnsureLicenseForEmailAsync(repo, email, TimeSpan.FromDays(30));
         }
         else if (isCancel)
         {
-            await repo.ProlongByEmailAsync(email!, delta); // expira forte
+            await repo.ProlongByEmailAsync(email, delta);
         }
     }
 
-    // 4) Log leve (não falha o webhook se der erro)
-    try { await repo.LogWebhookAsync(evt, email, (int)delta.TotalDays, body); } catch { /* ignore */ }
+    try { await repo.LogWebhookAsync(evt, email, (int)delta.TotalDays, body); } catch { }
 
     return Results.Ok(new { received = true, eventRaw = evt, email, appliedDays = delta.TotalDays });
 });
 
-
-// Helper local para o webhook (Program.cs)
+// =============================================================
+// Helper global (fora do MapPost) — sem conflitos
+// =============================================================
 static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)
 {
-    // Estratégia:
-    // - Tenta prolongar por e-mail (se não existir, 0 linhas afetadas)
-    // - Se não existir, cria uma licença nova e já volta ativa + prazo
+    // Tenta prolongar (se existir)
     await repo.ProlongByEmailAsync(email, renewDelta);
 
-    // Opcionalmente, você pode checar se de fato existia algo e,
-    // se não existia, criar uma nova licença com uma license_key gerada.
-    // Para garantir a criação em qualquer cenário, criamos também aqui:
-
-    // Gera uma license_key amigável ao produto
+    // Gera license key nova (garantindo string não nula)
     var newKey = $"PLN-{Guid.NewGuid():N}".ToUpperInvariant();
 
-    // Tenta criar/renovar (se já existisse aquela key em outra situação, renova; se não, cria)
-    // Aqui, passamos o email e fingerprint nulo — o registro de ativação vira depois, quando o cliente validar
-    await repo.IssueOrRenewAsync(newKey, email, fingerprint: null);
+    // Cria se não existir
+    await repo.IssueOrRenewAsync(newKey, email, fingerprint: "");
 }
 
-
-// === Helper local: garante licença por e-mail ===
-// Estratégia:
-// 1) tenta renovar por e-mail (se já existir alguma);
-// 2) gera uma nova license_key e faz IssueOrRenewAsync (UPSERT por chave) amarrando ao e-mail.
-//    -> requer que seu PgRepo.IssueOrRenewAsync faça INSERT/UPDATE por license_key.
-static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan initial)
-{
-    // Renova se já existir (no-op se não existir)
-    await repo.ProlongByEmailAsync(email, initial);
-
-    // Gera uma key nova e faz UPSERT amarrando ao e-mail
-    string newKey = "PLN-" + Guid.NewGuid().ToString("N").ToUpperInvariant()[..20];
-    await repo.IssueOrRenewAsync(newKey, email, fingerprint: null);
-}
 
 
 
