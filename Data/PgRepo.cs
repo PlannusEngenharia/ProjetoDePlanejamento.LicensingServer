@@ -57,6 +57,9 @@ public sealed class PgRepo : ILicenseRepo
   // ===============================
 // ISSUE / RENEW LICENSE (corrigido)
 // ===============================
+// ===============================
+// ISSUE / RENEW LICENSE (final)
+// ===============================
 public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
 {
     await using var con = new NpgsqlConnection(_cs);
@@ -81,20 +84,43 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
             await using var rd = await check.ExecuteReaderAsync();
             if (await rd.ReadAsync())
             {
-                licId     = rd.GetInt32(0);
-                status    = rd.IsDBNull(1) ? null : rd.GetString(1);
+                licId = rd.GetInt32(0);
+                status = rd.IsDBNull(1) ? null : rd.GetString(1);
                 expiresAt = rd.GetDateTime(2);
             }
         }
 
-        // 2) Se NÃO existir ou estiver cancelada -> NÃO cria
+        // 2) Se não existir ou estiver cancelada → rejeita
         if (licId is null || string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
         {
             await tx.RollbackAsync();
             return null;
         }
 
-        // 3) Apenas UPDATE (renova +30 dias)
+        // 3) Bloqueia se tentar ativar em outro PC
+        if (!string.IsNullOrWhiteSpace(fingerprint))
+        {
+            const string chkSql = @"
+                select fingerprint
+                  from public.activations
+                 where license_id = @lid and status = 'active'
+                 limit 1;";
+            await using (var chk = new NpgsqlCommand(chkSql, con, tx))
+            {
+                chk.Parameters.AddWithValue("@lid", licId!.Value);
+                var existing = await chk.ExecuteScalarAsync() as string;
+
+                if (existing != null && existing != fingerprint)
+                {
+                    // outra máquina já ativada
+                    await tx.RollbackAsync();
+                    Console.Error.WriteLine($"[BLOCK] Licença {licenseKey} já está ativa em outro PC.");
+                    return null;
+                }
+            }
+        }
+
+        // 4) Atualiza validade
         const string upSql = @"
             update public.licenses
                set email      = coalesce(@e, email),
@@ -111,23 +137,24 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
             await using var rd = await up.ExecuteReaderAsync();
             if (!await rd.ReadAsync())
                 throw new InvalidOperationException("UPDATE em licenses não retornou linha.");
-            licId     = rd.GetInt32(0);
-            email     = rd.IsDBNull(1) ? email : rd.GetString(1);
-            status    = rd.GetString(2);
+
+            licId = rd.GetInt32(0);
+            email = rd.IsDBNull(1) ? email : rd.GetString(1);
+            status = rd.GetString(2);
             expiresAt = rd.GetDateTime(3);
         }
 
-        // 4) Registrar ativação se veio fingerprint
+        // 5) Registra / atualiza ativação (caso fingerprint válido)
         if (!string.IsNullOrWhiteSpace(fingerprint))
         {
             const string actUpsert = @"
                 insert into public.activations
                     (license_id, fingerprint, first_seen_at, last_seen_at, status)
                 values
-                    (@lid, @fp, CURRENT_DATE, CURRENT_DATE, 'active')
+                    (@lid, @fp, now(), now(), 'active')
                 on conflict (license_id, fingerprint) do update
-                  set last_seen_at = excluded.last_seen_at,
-                      status       = 'active';";
+                  set last_seen_at = now(),
+                      status = 'active';";
             await using var aCmd = new NpgsqlCommand(actUpsert, con, tx);
             aCmd.Parameters.AddWithValue("@lid", licId!.Value);
             aCmd.Parameters.AddWithValue("@fp", fingerprint!);
