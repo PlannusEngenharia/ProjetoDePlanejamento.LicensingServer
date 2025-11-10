@@ -54,87 +54,88 @@ public sealed class PgRepo : ILicenseRepo
         return ToSigned(id, email, status, expiresAt, null);
     }
 
-    // ======================================================
-    // ISSUE / RENEW LICENSE (corrigido)
-    // ======================================================
-    public async Task<LicenseResponse?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+  // ===============================
+// ISSUE / RENEW LICENSE (corrigido)
+// ===============================
+public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+{
+    await using var con = new NpgsqlConnection(_cs);
+    await con.OpenAsync();
+
+    // 1️⃣ Verifica se a licença existe
+    const string checkSql = @"
+        select id, status, coalesce(expires_at, now()) as expires_at
+          from public.licenses
+         where license_key = @k
+         limit 1;";
+    int? licId = null;
+    string? status = null;
+    DateTime expiresAt = DateTime.UtcNow;
+
+    await using (var checkCmd = new NpgsqlCommand(checkSql, con))
     {
-        await using var con = new NpgsqlConnection(_cs);
-        await con.OpenAsync();
-
-        // 1️⃣ Verifica se a licença existe
-        const string checkSql = @"
-            select id, status, coalesce(expires_at, now()) as expires_at
-              from public.licenses
-             where license_key = @k
-             limit 1;";
-        int? licId = null;
-        string? status = null;
-        DateTime expiresAt = DateTime.UtcNow;
-
-        await using (var checkCmd = new NpgsqlCommand(checkSql, con))
+        checkCmd.Parameters.AddWithValue("@k", licenseKey);
+        await using var rd = await checkCmd.ExecuteReaderAsync();
+        if (await rd.ReadAsync())
         {
-            checkCmd.Parameters.AddWithValue("@k", licenseKey);
-            await using var rd = await checkCmd.ExecuteReaderAsync();
-            if (await rd.ReadAsync())
-            {
-                licId = rd.GetInt32(0);
-                status = rd.IsDBNull(1) ? null : rd.GetString(1);
-                expiresAt = rd.GetDateTime(2);
-            }
+            licId = rd.GetInt32(0);
+            status = rd.IsDBNull(1) ? null : rd.GetString(1);
+            expiresAt = rd.GetDateTime(2);
         }
-
-        // 2️⃣ Se NÃO existir → não cria, retorna null
-        if (licId is null)
-            return null;
-
-        // 3️⃣ Bloqueia canceladas
-        if (string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
-            return null;
-
-        // 4️⃣ Renova por +30 dias
-        var newExpires = DateTime.UtcNow.AddDays(30);
-        const string upSql = @"
-            update public.licenses
-               set email = coalesce(@e, email),
-                   status = 'active',
-                   expires_at = @x,
-                   updated_at = now()
-             where license_key = @k;";
-        await using (var upCmd = new NpgsqlCommand(upSql, con))
-        {
-            upCmd.Parameters.AddWithValue("@k", licenseKey);
-            upCmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
-            upCmd.Parameters.AddWithValue("@x", newExpires);
-            await upCmd.ExecuteNonQueryAsync();
-        }
-
-        // 5️⃣ Registra ativação
-        const string actSql = @"
-            insert into public.activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
-            values (@lid, @f, now(), now(), 'active')
-            on conflict (license_id, fingerprint) do update
-              set last_seen_at = now(),
-                  status = 'active';";
-        await using (var aCmd = new NpgsqlCommand(actSql, con))
-        {
-            aCmd.Parameters.AddWithValue("@lid", licId);
-            aCmd.Parameters.AddWithValue("@f", (object?)fingerprint ?? DBNull.Value);
-            await aCmd.ExecuteNonQueryAsync();
-        }
-
-        return new LicenseResponse
-        {
-            Payload = new LicensePayload
-            {
-                LicenseId = licenseKey,
-                Email = email ?? "",
-                Fingerprint = fingerprint ?? "",
-                ExpiresAtUtc = newExpires,
-                SubscriptionStatus = "active"
-            }
-        };
     }
+
+    // 2️⃣ Se NÃO existir → não cria, retorna null
+    if (licId is null)
+        return null;
+
+    // 3️⃣ Bloqueia canceladas
+    if (string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
+        return null;
+
+    // 4️⃣ Renova por +30 dias
+    var newExpires = DateTime.UtcNow.AddDays(30);
+    const string upSql = @"
+        update public.licenses
+           set email = coalesce(@e, email),
+               status = 'active',
+               expires_at = @x,
+               updated_at = now()
+         where license_key = @k;";
+    await using (var upCmd = new NpgsqlCommand(upSql, con))
+    {
+        upCmd.Parameters.AddWithValue("@k", licenseKey);
+        upCmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+        upCmd.Parameters.AddWithValue("@x", newExpires);
+        await upCmd.ExecuteNonQueryAsync();
+    }
+
+    // 5️⃣ Registra ativação
+    const string actSql = @"
+        insert into public.activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
+        values (@lid, @f, now(), now(), 'active')
+        on conflict (license_id, fingerprint) do update
+          set last_seen_at = now(),
+              status = 'active';";
+    await using (var aCmd = new NpgsqlCommand(actSql, con))
+    {
+        aCmd.Parameters.AddWithValue("@lid", licId);
+        aCmd.Parameters.AddWithValue("@f", (object?)fingerprint ?? DBNull.Value);
+        await aCmd.ExecuteNonQueryAsync();
+    }
+
+    // ✅ Retorna SignedLicense, conforme interface
+    return new SignedLicense
+    {
+        Payload = new LicensePayload
+        {
+            LicenseId = licenseKey,
+            Email = email ?? "",
+            Fingerprint = fingerprint ?? "",
+            ExpiresAtUtc = newExpires,
+            SubscriptionStatus = "active"
+        }
+    };
+}
 
     // ======================================================
     // GET OR START TRIAL
