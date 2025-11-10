@@ -286,14 +286,16 @@ var trialUrl = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL")
 
 
 // ===== Download trial (redireciona para o instalador do GitHub) =====
-var trialUrlRaw = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL") ?? "";
-var trialUrl = trialUrlRaw.Trim();
+// ===== Download trial (redireciona para o instalador do GitHub) =====
+// pegue uma única vez e normalize; NÃO volte a declarar depois!
+var trialUrlEnvRaw = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL") ?? "";
+var downloadTrialUrl = trialUrlEnvRaw.Trim();
 
 app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req, HttpContext ctx, ILicenseRepo repo) =>
 {
     try
     {
-        // 1) Log no Postgres (não pode derrubar a rota se falhar)
+        // log no Postgres (não pode derrubar a rota)
         try
         {
             var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
@@ -301,17 +303,17 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req
             var referer = req.Headers["Referer"].ToString();
             await repo.LogDownloadAsync(ip, ua, string.IsNullOrWhiteSpace(referer) ? null : referer);
         }
-        catch { /* swallow: não quebrar o download */ }
+        catch { /* ignore */ }
 
-        // 2) Validação da URL de destino
-        if (string.IsNullOrWhiteSpace(trialUrl) || 
-            !Uri.TryCreate(trialUrl, UriKind.Absolute, out var uri) ||
+        // valida a URL vinda da env (usa a variável já declarada acima!)
+        if (string.IsNullOrWhiteSpace(downloadTrialUrl) ||
+            !Uri.TryCreate(downloadTrialUrl, UriKind.Absolute, out var uri) ||
             (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
         {
             return Results.Problem("DOWNLOAD_TRIAL_URL ausente ou inválida (configure a env no Railway).", statusCode: 500);
         }
 
-        // 3) Mobile hint (GET apenas)
+        // se mobile e GET, mostra página informativa
         var uaLower = req.Headers["User-Agent"].ToString().ToLowerInvariant();
         bool isMobile = uaLower.Contains("iphone") || uaLower.Contains("ipad") || uaLower.Contains("android");
 
@@ -324,21 +326,21 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req
               <h2>Baixe no seu computador Windows</h2>
               <p>Este instalador (.exe) só funciona no Windows.<br>
               Envie este link para seu e-mail ou abra no computador para baixar.</p>
-              <p style="margin-top:16px"><a href="{trialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
+              <p style="margin-top:16px"><a href="{downloadTrialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
             </div>
             """;
             return Results.Content(html, "text/html; charset=utf-8");
         }
 
-        // 4) Redirect normal
-        return Results.Redirect(trialUrl, permanent: false);
+        // redirect normal
+        return Results.Redirect(downloadTrialUrl, permanent: false);
     }
     catch (Exception ex)
     {
-        // fallback amigável para evitar 500 "mudo"
         return Results.Problem($"Falha ao processar o download: {ex.Message}", statusCode: 500);
     }
 });
+
 
 
 
