@@ -115,22 +115,25 @@ app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
 // ===== API: ATIVAR (gera/renova licença e assina payload) =====
-app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo, HttpContext http) =>
+app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
-    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
-        return Results.BadRequest(new { error = "licenseKey obrigatório" });
+    var lic = await repo.IssueOrRenewAsync(req.LicenseKey, req.Email, req.Fingerprint);
 
-    // Throttle básico por IP (3s)
-    var ip = http.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    if (IsThrottled(lastHitByIp, ip, TimeSpan.FromSeconds(3)))
-        return Results.StatusCode(StatusCodes.Status429TooManyRequests);
+    if (lic == null)
+    {
+        return Results.BadRequest(new
+        {
+            ok = false,
+            error = "licenseKey inválida ou não encontrada.",
+            licenseKey = req.LicenseKey
+        });
+    }
 
-    var lic = await repo.IssueOrRenewAsync(req.LicenseKey!.Trim(), req.Email, req.Fingerprint);
-    if (lic is null)
-        return Results.BadRequest(new { error = "licenseKey inválida" });
-
-    lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
-    return Results.Ok(lic);
+    return Results.Ok(new
+    {
+        ok = true,
+        payload = lic.Payload
+    });
 });
 
 // ===== API: STATUS (stub para POC) =====
