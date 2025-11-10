@@ -210,20 +210,18 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     // 3) Aplica ação por tipo de evento
     TimeSpan delta =
         isRenew ? TimeSpan.FromDays(30) :
-        isCancel ? TimeSpan.FromDays(-3650) : // expira "forte"
+        isCancel ? TimeSpan.FromDays(-3650) :
         TimeSpan.Zero;
 
     if (!string.IsNullOrWhiteSpace(email))
     {
         if (isRenew)
         {
-            // Garante licença ativa para o e-mail: renova se existir; cria se não existir
             await EnsureLicenseForEmailAsync(repo, email!, TimeSpan.FromDays(30));
         }
         else if (isCancel)
         {
-            // “Revoga” por e-mail (expira bem no passado)
-            await repo.ProlongByEmailAsync(email!, delta);
+            await repo.ProlongByEmailAsync(email!, delta); // expira forte
         }
     }
 
@@ -232,6 +230,28 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 
     return Results.Ok(new { received = true, eventRaw = evt, email, appliedDays = delta.TotalDays });
 });
+
+
+// Helper local para o webhook (Program.cs)
+static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)
+{
+    // Estratégia:
+    // - Tenta prolongar por e-mail (se não existir, 0 linhas afetadas)
+    // - Se não existir, cria uma licença nova e já volta ativa + prazo
+    await repo.ProlongByEmailAsync(email, renewDelta);
+
+    // Opcionalmente, você pode checar se de fato existia algo e,
+    // se não existia, criar uma nova licença com uma license_key gerada.
+    // Para garantir a criação em qualquer cenário, criamos também aqui:
+
+    // Gera uma license_key amigável ao produto
+    var newKey = $"PLN-{Guid.NewGuid():N}".ToUpperInvariant();
+
+    // Tenta criar/renovar (se já existisse aquela key em outra situação, renova; se não, cria)
+    // Aqui, passamos o email e fingerprint nulo — o registro de ativação vira depois, quando o cliente validar
+    await repo.IssueOrRenewAsync(newKey, email, fingerprint: null);
+}
+
 
 // === Helper local: garante licença por e-mail ===
 // Estratégia:
