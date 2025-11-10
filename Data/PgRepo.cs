@@ -61,81 +61,122 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
 {
     await using var con = new NpgsqlConnection(_cs);
     await con.OpenAsync();
+    await using var tx = await con.BeginTransactionAsync();
 
-    // 1️⃣ Verifica se a licença existe
-    const string checkSql = @"
-        select id, status, coalesce(expires_at, now()) as expires_at
-          from public.licenses
-         where license_key = @k
-         limit 1;";
-    int? licId = null;
-    string? status = null;
-    DateTime expiresAt = DateTime.UtcNow;
-
-    await using (var checkCmd = new NpgsqlCommand(checkSql, con))
+    try
     {
-        checkCmd.Parameters.AddWithValue("@k", licenseKey);
-        await using var rd = await checkCmd.ExecuteReaderAsync();
-        if (await rd.ReadAsync())
+        // 1) Tenta localizar a licença por chave
+        const string checkSql = @"
+            select id, status, coalesce(expires_at, now()) as expires_at
+              from public.licenses
+             where license_key = @k
+             limit 1;";
+        int? licId = null;
+        string? status = null;
+        DateTime expiresAt = DateTime.UtcNow;
+
+        await using (var checkCmd = new NpgsqlCommand(checkSql, con, tx))
         {
-            licId = rd.GetInt32(0);
-            status = rd.IsDBNull(1) ? null : rd.GetString(1);
-            expiresAt = rd.GetDateTime(2);
+            checkCmd.Parameters.AddWithValue("@k", licenseKey);
+            await using var rd = await checkCmd.ExecuteReaderAsync();
+            if (await rd.ReadAsync())
+            {
+                licId     = rd.GetInt32(0);
+                status    = rd.IsDBNull(1) ? null : rd.GetString(1);
+                expiresAt = rd.GetDateTime(2);
+            }
         }
-    }
 
-    // 2️⃣ Se NÃO existir → não cria, retorna null
-    if (licId is null)
-        return null;
-
-    // 3️⃣ Bloqueia canceladas
-    if (string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
-        return null;
-
-    // 4️⃣ Renova por +30 dias
-    var newExpires = DateTime.UtcNow.AddDays(30);
-    const string upSql = @"
-        update public.licenses
-           set email = coalesce(@e, email),
-               status = 'active',
-               expires_at = @x,
-               updated_at = now()
-         where license_key = @k;";
-    await using (var upCmd = new NpgsqlCommand(upSql, con))
-    {
-        upCmd.Parameters.AddWithValue("@k", licenseKey);
-        upCmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
-        upCmd.Parameters.AddWithValue("@x", newExpires);
-        await upCmd.ExecuteNonQueryAsync();
-    }
-
-    // 5️⃣ Registra ativação
-    const string actSql = @"
-        insert into public.activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
-        values (@lid, @f, now(), now(), 'active')
-        on conflict (license_id, fingerprint) do update
-          set last_seen_at = now(),
-              status = 'active';";
-    await using (var aCmd = new NpgsqlCommand(actSql, con))
-    {
-        aCmd.Parameters.AddWithValue("@lid", licId);
-        aCmd.Parameters.AddWithValue("@f", (object?)fingerprint ?? DBNull.Value);
-        await aCmd.ExecuteNonQueryAsync();
-    }
-
-    // ✅ Retorna SignedLicense, conforme interface
-    return new SignedLicense
-    {
-        Payload = new LicensePayload
+        // 2) Se não existir => INSERT (cria licença nova)
+        if (licId is null)
         {
-            LicenseId = licenseKey,
-            Email = email ?? "",
-            Fingerprint = fingerprint ?? "",
-            ExpiresAtUtc = newExpires,
-            SubscriptionStatus = "active"
+            const string insSql = @"
+                insert into public.licenses
+                       (email, license_key, status, created_at, updated_at, expires_at)
+                values (@e,   @k,          'active', now(),     now(),      now() + interval '30 day')
+                returning id, email, status, expires_at;";
+            await using var insCmd = new NpgsqlCommand(insSql, con, tx);
+            insCmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+            insCmd.Parameters.AddWithValue("@k", licenseKey);
+
+            await using var rd = await insCmd.ExecuteReaderAsync();
+            if (!await rd.ReadAsync())
+                throw new InvalidOperationException("INSERT em licenses não retornou linha.");
+
+            licId     = rd.GetInt32(0);
+            email     = rd.IsDBNull(1) ? email : rd.GetString(1);
+            status    = rd.GetString(2);
+            expiresAt = rd.GetDateTime(3);
         }
-    };
+        else
+        {
+            // 3) Se já existir e estiver cancelada ⇒ bloquear
+            if (string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
+            {
+                await tx.RollbackAsync();
+                return null;
+            }
+
+            // 4) UPDATE (renova +30 dias e mantém/atualiza email)
+            const string upSql = @"
+                update public.licenses
+                   set email      = coalesce(@e, email),
+                       status     = 'active',
+                       expires_at = now() + interval '30 day',
+                       updated_at = now()
+                 where license_key = @k
+                 returning id, email, status, expires_at;";
+            await using var upCmd = new NpgsqlCommand(upSql, con, tx);
+            upCmd.Parameters.AddWithValue("@k", licenseKey);
+            upCmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+
+            await using var rd = await upCmd.ExecuteReaderAsync();
+            if (!await rd.ReadAsync())
+                throw new InvalidOperationException("UPDATE em licenses não retornou linha.");
+
+            licId     = rd.GetInt32(0);
+            email     = rd.IsDBNull(1) ? email : rd.GetString(1);
+            status    = rd.GetString(2);
+            expiresAt = rd.GetDateTime(3);
+        }
+
+        // 5) UPSERT em activations (id + fingerprint)
+        const string actSql = @"
+            insert into public.activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
+            values (@lid, @f, now(), now(), 'active')
+            on conflict (license_id, fingerprint) do update
+              set last_seen_at = excluded.last_seen_at,
+                  status       = 'active';";
+        await using (var aCmd = new NpgsqlCommand(actSql, con, tx))
+        {
+            aCmd.Parameters.AddWithValue("@lid", licId!);
+            aCmd.Parameters.AddWithValue("@f", (object?)fingerprint ?? DBNull.Value);
+            await aCmd.ExecuteNonQueryAsync();
+        }
+
+        await tx.CommitAsync();
+
+        // 6) Retorna o SignedLicense conforme a interface
+        return new SignedLicense
+        {
+            Payload = new LicensePayload
+            {
+                LicenseId          = licenseKey,
+                Email              = email ?? "",
+                Fingerprint        = fingerprint ?? "",
+                ExpiresAtUtc       = expiresAt,          // já veio do RETURNING
+                SubscriptionStatus = "active"
+            }
+            // SignatureBase64 (se você assinar aqui, preencha depois)
+        };
+    }
+    catch
+    {
+        await tx.RollbackAsync();
+        throw;
+    }
 }
+
 
     // ======================================================
     // GET OR START TRIAL
