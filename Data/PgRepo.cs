@@ -83,7 +83,7 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
             {
                 licId     = rd.GetInt32(0);
                 status    = rd.IsDBNull(1) ? null : rd.GetString(1);
-                // coluna é DATE → pega como DateTime (sem hora)
+                // coluna DATE -> sem hora
                 expiresAt = rd.GetDateTime(2);
             }
         }
@@ -138,34 +138,32 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
             expiresAt = rd.GetDateTime(3);
         }
 
-        // 4) Registrar ativação SEM depender de índice/constraint
-        //    (tenta inserir; se já existir, faz update)
-        const string actInsert = @"
-            insert into public.activations
-                (license_id, fingerprint, first_seen_at, last_seen_at, status)
-            values
-                (@lid, @fp, CURRENT_DATE, CURRENT_DATE, 'active')
-            on conflict do nothing;"; // segura se não houver unique
-        await using (var aIns = new NpgsqlCommand(actInsert, con, tx))
+        // 4) Registrar ativação SOMENTE se houver fingerprint
+        if (!string.IsNullOrWhiteSpace(fingerprint))
         {
-            aIns.Parameters.AddWithValue("@lid", licId!);
-            aIns.Parameters.AddWithValue("@fp", (object?)fingerprint ?? DBNull.Value);
-            await aIns.ExecuteNonQueryAsync();
-        }
-
-        const string actUpdate = @"
-            update public.activations
-               set last_seen_at = CURRENT_DATE,
-                   status       = 'active'
-             where license_id = @lid and ((fingerprint = @fp) or (@fp is null and fingerprint is null));";
-        await using (var aUpd = new NpgsqlCommand(actUpdate, con, tx))
-        {
-            aUpd.Parameters.AddWithValue("@lid", licId!);
-            aUpd.Parameters.AddWithValue("@fp", (object?)fingerprint ?? DBNull.Value);
-            await aUpd.ExecuteNonQueryAsync();
+            const string actUpsert = @"
+                insert into public.activations
+                    (license_id, fingerprint, first_seen_at, last_seen_at, status)
+                values
+                    (@lid, @fp, CURRENT_DATE, CURRENT_DATE, 'active')
+                on conflict (license_id, fingerprint) do update
+                  set last_seen_at = excluded.last_seen_at,
+                      status       = 'active';";
+            await using var aCmd = new NpgsqlCommand(actUpsert, con, tx)
+            {
+                Parameters =
+                {
+                    new("@lid", licId!),
+                    new("@fp", fingerprint!)
+                }
+            };
+            await aCmd.ExecuteNonQueryAsync();
         }
 
         await tx.CommitAsync();
+
+        // marca como UTC (coluna é DATE, então meia-noite UTC)
+        var expiresAtUtc = DateTime.SpecifyKind(expiresAt, DateTimeKind.Utc);
 
         return new SignedLicense
         {
@@ -174,7 +172,7 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
                 LicenseId          = licenseKey,
                 Email              = email ?? "",
                 Fingerprint        = fingerprint ?? "",
-                ExpiresAtUtc       = expiresAt,     // DATE → meia-noite UTC
+                ExpiresAtUtc       = expiresAtUtc,
                 SubscriptionStatus = "active"
             }
         };
