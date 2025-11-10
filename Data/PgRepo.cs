@@ -246,21 +246,36 @@ public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? e
     // ======================================================
     // PROLONG BY EMAIL (webhook)
     // ======================================================
-    public async Task ProlongByEmailAsync(string email, TimeSpan delta)
-    {
-        await using var conn = new NpgsqlConnection(_cs);
-        await conn.OpenAsync();
+    // PgRepo.cs
+public async Task ProlongByEmailAsync(string email, TimeSpan delta)
+{
+    await using var conn = new NpgsqlConnection(_cs);
+    await conn.OpenAsync();
 
-        const string sql = @"
-            update public.licenses
-               set updated_at = now(),
-                   expires_at = expires_at + (@d || ' days')::interval
-             where lower(email) = lower(@e);";
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("@e", email);
-        cmd.Parameters.AddWithValue("@d", delta.Days);
-        await cmd.ExecuteNonQueryAsync();
-    }
+    // Gera uma nova chave só se precisar inserir
+    var newKey = $"PLN-{Guid.NewGuid():N}".ToUpperInvariant();
+    var days = delta.Days; // pode ser negativo (cancelamento)
+
+    const string sql = @"
+with upd as (
+    update public.licenses
+       set updated_at = now(),
+           expires_at = expires_at + (@d || ' days')::interval,
+           status     = case when @d >= 0 then 'active' else 'canceled' end
+     where lower(email) = lower(@e)
+     returning id
+)
+insert into public.licenses (email, license_key, status, created_at, updated_at, expires_at)
+select @e, @k, 'active', now(), now(), now() + (@d || ' days')::interval
+where not exists (select 1 from upd);";
+
+    await using var cmd = new NpgsqlCommand(sql, conn);
+    cmd.Parameters.AddWithValue("@e", email);
+    cmd.Parameters.AddWithValue("@d", days);
+    cmd.Parameters.AddWithValue("@k", newKey);
+    await cmd.ExecuteNonQueryAsync();
+}
+
 
     // ======================================================
     // DOWNLOAD LOG
