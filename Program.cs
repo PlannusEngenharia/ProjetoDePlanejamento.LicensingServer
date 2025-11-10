@@ -167,28 +167,27 @@ app.MapPost("/api/check", (HttpRequest _) =>
 // ===== Webhook Hotmart (v2) =====
 app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILicenseRepo repo) =>
 {
-    // 1) Valida HOTTOK (faz Trim para eliminar espaços/linhas acidentais)
+    // 1) Valida HOTTOK
     var expected = (Environment.GetEnvironmentVariable("HOTMART_HOTTOK") ?? "").Trim();
-
     string? got =
         req.Headers["hottok"].FirstOrDefault()
         ?? req.Headers["HOTTOK"].FirstOrDefault()
         ?? req.Headers["x-hotmart-hottok"].FirstOrDefault();
-
     got = got?.Trim();
 
     if (string.IsNullOrEmpty(expected) || string.IsNullOrEmpty(got) || !CryptographicEquals(expected, got))
         return Results.Unauthorized();
 
-    // ... (restante do handler fica igual)
+    // 2) Extrai campos relevantes
     var root = body.RootElement;
+
     string? evt =
         TryGetString(root, "event") ??
         TryGetString(root, "event_key") ??
         TryGetString(root, "status") ??
         TryGetString(root, "type");
 
-    string? email =
+    string? emailRaw =
         TryGetString(root, "buyer_email") ??
         TryGetString(root, "email") ??
         TryGetString(root, "customer_email") ??
@@ -196,6 +195,7 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
         TryGetByPath(root, "subscription.customer.email");
 
     var e = (evt ?? "").Trim().ToLowerInvariant();
+    var email = string.IsNullOrWhiteSpace(emailRaw) ? null : emailRaw!.Trim().ToLowerInvariant();
 
     bool isRenew =
         e.Contains("approved") || e.Contains("aprovad") ||
@@ -207,16 +207,47 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
         e.Contains("canceled") || e.Contains("cancel") ||
         e.Contains("chargeback");
 
+    // 3) Aplica ação por tipo de evento
     TimeSpan delta =
         isRenew ? TimeSpan.FromDays(30) :
-        isCancel ? TimeSpan.FromDays(-30) :
+        isCancel ? TimeSpan.FromDays(-3650) : // expira "forte"
         TimeSpan.Zero;
 
-    if (delta != TimeSpan.Zero && !string.IsNullOrWhiteSpace(email))
-        await repo.ProlongByEmailAsync(email!.Trim().ToLowerInvariant(), delta);
+    if (!string.IsNullOrWhiteSpace(email))
+    {
+        if (isRenew)
+        {
+            // Garante licença ativa para o e-mail: renova se existir; cria se não existir
+            await EnsureLicenseForEmailAsync(repo, email!, TimeSpan.FromDays(30));
+        }
+        else if (isCancel)
+        {
+            // “Revoga” por e-mail (expira bem no passado)
+            await repo.ProlongByEmailAsync(email!, delta);
+        }
+    }
 
-    return Results.Ok(new { received = true, appliedDays = delta.TotalDays, eventRaw = evt });
+    // 4) Log leve (não falha o webhook se der erro)
+    try { await repo.LogWebhookAsync(evt, email, (int)delta.TotalDays, body); } catch { /* ignore */ }
+
+    return Results.Ok(new { received = true, eventRaw = evt, email, appliedDays = delta.TotalDays });
 });
+
+// === Helper local: garante licença por e-mail ===
+// Estratégia:
+// 1) tenta renovar por e-mail (se já existir alguma);
+// 2) gera uma nova license_key e faz IssueOrRenewAsync (UPSERT por chave) amarrando ao e-mail.
+//    -> requer que seu PgRepo.IssueOrRenewAsync faça INSERT/UPDATE por license_key.
+static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan initial)
+{
+    // Renova se já existir (no-op se não existir)
+    await repo.ProlongByEmailAsync(email, initial);
+
+    // Gera uma key nova e faz UPSERT amarrando ao e-mail
+    string newKey = "PLN-" + Guid.NewGuid().ToString("N").ToUpperInvariant()[..20];
+    await repo.IssueOrRenewAsync(newKey, email, fingerprint: null);
+}
+
 
 
 // ===== Helpers =====
