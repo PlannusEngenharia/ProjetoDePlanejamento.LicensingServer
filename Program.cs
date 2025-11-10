@@ -285,35 +285,40 @@ var trialUrl = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL")
     ?? "https://github.com/PlannusEngenharia/ProjetoDePlanejamento.LicensingServer/releases/download/v1.0.0/PlannusSetup-1.0.0.exe";
 
 
-app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req, HttpContext ctx, ILicenseRepo repo) =>
+app.MapGet("/download/demo", async (HttpContext ctx, ILicenseRepo repo) =>
 {
     var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-    var ua = req.Headers["User-Agent"].ToString();
-    var referer = req.Headers["Referer"].ToString();
+    var ua = ctx.Request.Headers["User-Agent"].ToString();
+    var referer = ctx.Request.Headers["Referer"].ToString();
 
-    // grava no Postgres (tabela downloads)
-    await repo.LogDownloadAsync(ip, ua, string.IsNullOrWhiteSpace(referer) ? null : referer);
-
-    var ual = ua.ToLowerInvariant();
-    bool isMobile = ual.Contains("iphone") || ual.Contains("ipad") || ual.Contains("android");
-
-    if (isMobile && req.Method == "GET")
+    try
     {
-        var html = $"""
-        <!doctype html><meta charset="utf-8">
-        <title>Baixe no computador</title>
-        <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:680px;margin:48px auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;">
-          <h2>Baixe no seu computador Windows</h2>
-          <p>Este instalador (.exe) só funciona no Windows.<br>
-          Envie este link para seu e-mail ou abra no computador para baixar.</p>
-          <p style="margin-top:16px"><a href="{trialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
-        </div>
-        """;
-        return Results.Content(html, "text/html; charset=utf-8");
+        await repo.LogDownloadAsync(ip, ua, referer);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[download/log] erro: {ex.Message}");
     }
 
-    return Results.Redirect(trialUrl, permanent: false);
+    var trialUrl = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL");
+    if (string.IsNullOrWhiteSpace(trialUrl))
+    {
+        Console.WriteLine("[download] DOWNLOAD_TRIAL_URL não configurada!");
+        return Results.Problem("A URL de download não está configurada no servidor (DOWNLOAD_TRIAL_URL).");
+    }
+
+    try
+    {
+        Console.WriteLine($"[download] redirecionando para {trialUrl}");
+        return Results.Redirect(trialUrl, permanent: false);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[download/redirect] erro: {ex.Message}");
+        return Results.Problem($"Erro ao redirecionar: {ex.Message}");
+    }
 });
+
 
 
 // === VALIDATE ===
