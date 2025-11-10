@@ -233,17 +233,12 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
 // =============================================================
 // Helper global (fora do MapPost) — sem conflitos
 // =============================================================
+// Program.cs
 static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)
 {
-    // Tenta prolongar (se existir)
-    await repo.ProlongByEmailAsync(email, renewDelta);
-
-    // Gera license key nova (garantindo string não nula)
-    var newKey = $"PLN-{Guid.NewGuid():N}".ToUpperInvariant();
-
-    // Cria se não existir
-    await repo.IssueOrRenewAsync(newKey, email, fingerprint: "");
+    await repo.ProlongByEmailAsync(email, renewDelta); // agora cria OU atualiza
 }
+
 
 
 
