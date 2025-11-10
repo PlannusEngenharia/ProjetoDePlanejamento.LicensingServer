@@ -54,7 +54,9 @@ public sealed class PgRepo : ILicenseRepo
     // ===============================
     // ISSUE / RENEW LICENSE
     // ===============================
-    public async Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint)
+   
+
+ public async Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
     {
         await using var conn = new NpgsqlConnection(_cs);
         await conn.OpenAsync();
@@ -62,32 +64,28 @@ public sealed class PgRepo : ILicenseRepo
 
         try
         {
+            var trialKey = $"TRIAL-{fingerprint}";
+
             const string upLic = @"
                 insert into public.licenses (created_at, updated_at, email, license_key, status, expires_at)
-                values (CURRENT_DATE, CURRENT_DATE, coalesce(@e, 'cliente@desconhecido'), @k, 'active', CURRENT_DATE + 30)
+                values (CURRENT_DATE, CURRENT_DATE, coalesce(@e,'trial@user'), @k, 'trial', CURRENT_DATE + @dias)
                 on conflict (license_key) do update
                   set updated_at = CURRENT_DATE,
-                      email      = coalesce(@e, public.licenses.email),
-                      status     = 'active',
-                      expires_at = case
-                                     when public.licenses.expires_at < CURRENT_DATE + 30
-                                       then CURRENT_DATE + 30
-                                     else public.licenses.expires_at
-                                   end
+                      status     = 'trial',
+                      expires_at = greatest(public.licenses.expires_at, CURRENT_DATE + @dias)
                 returning id, email, status, expires_at;";
 
-            int licId;
-            string retEmail, retStatus;
-            DateTime retExpires;
+            int licId; string retEmail, retStatus; DateTime retExpires;
 
             await using (var cmd = new NpgsqlCommand(upLic, conn, tx))
             {
-                cmd.Parameters.AddWithValue("@k", licenseKey);
                 cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@k", trialKey);
+                cmd.Parameters.AddWithValue("@dias", trialDays);
 
                 await using var rd = await cmd.ExecuteReaderAsync();
                 if (!await rd.ReadAsync())
-                    throw new InvalidOperationException("UPSERT em licenses não retornou linha.");
+                    throw new InvalidOperationException("UPSERT trial não retornou linha.");
 
                 licId = rd.GetInt32(0);
                 retEmail = rd.GetString(1);
@@ -96,20 +94,19 @@ public sealed class PgRepo : ILicenseRepo
                 await rd.CloseAsync();
             }
 
-            if (!string.IsNullOrWhiteSpace(fingerprint))
-            {
-                const string upAct = @"
-                    insert into public.activations
-                        (license_id, fingerprint, machine_name, client_version, ip, first_seen_at, last_seen_at, status)
-                    values
-                        (@lid, @fp, null, null, null, CURRENT_DATE, CURRENT_DATE, 'active')
-                    on conflict (license_id, fingerprint) do update
-                      set last_seen_at = CURRENT_DATE,
-                          status = 'active';";
+            const string upAct = @"
+                insert into public.activations
+                    (license_id, fingerprint, machine_name, client_version, ip, first_seen_at, last_seen_at, status)
+                values
+                    (@lid, @fp, null, null, null, CURRENT_DATE, CURRENT_DATE, 'active')
+                on conflict (license_id, fingerprint) do update
+                  set last_seen_at = CURRENT_DATE,
+                      status = 'active';";
 
-                await using var cmd2 = new NpgsqlCommand(upAct, conn, tx);
+            await using (var cmd2 = new NpgsqlCommand(upAct, conn, tx))
+            {
                 cmd2.Parameters.AddWithValue("@lid", licId);
-                cmd2.Parameters.AddWithValue("@fp", fingerprint!);
+                cmd2.Parameters.AddWithValue("@fp", fingerprint);
                 await cmd2.ExecuteNonQueryAsync();
             }
 
@@ -119,7 +116,7 @@ public sealed class PgRepo : ILicenseRepo
         catch (Exception ex)
         {
             await tx.RollbackAsync();
-            Console.Error.WriteLine($"[PgRepo.IssueOrRenewAsync] {ex}");
+            Console.Error.WriteLine($"[PgRepo.GetOrStartTrialAsync] {ex}");
             throw;
         }
     }
