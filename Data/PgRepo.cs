@@ -344,10 +344,12 @@ where not exists (select 1 from upd);";
     // ======================================================
     // WEBHOOK LOG (stdout)
     // ======================================================
-    public async Task LogWebhookAsync(string? hottok, string? eventKey, int httpStatus, JsonDocument payload)
-    {
-        await Task.Yield();
-        Console.Error.WriteLine($"[Webhook] token={(string.IsNullOrEmpty(hottok) ? "none" : "ok")} event={eventKey} status={httpStatus} payload={payload.RootElement.GetRawText().Length}B");
-    }
+    public async Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw)
+{
+    await Task.Yield();
+    Console.Error.WriteLine(
+        $"[Webhook] evt={evt ?? "-"} email={email ?? "-"} appliedDays={appliedDays} payload={raw.RootElement.GetRawText().Length}B");
+}
+
 }
 
