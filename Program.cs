@@ -115,26 +115,56 @@ app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
 // ===== API: ATIVAR (gera/renova licença e assina payload) =====
+// ===== API: ATIVAR (somente ativa; não cria) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
-    var lic = await repo.IssueOrRenewAsync(req.LicenseKey, req.Email, req.Fingerprint);
+    if (string.IsNullOrWhiteSpace(req.LicenseKey))
+        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
 
-    if (lic == null)
+    var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+    if (lic is null)
+        return Results.NotFound(new { ok = false, error = "license_not_found" });
+
+    // e-mail canônico é o que está no servidor
+    var canonicalEmail = lic.Payload.Email?.Trim().ToLowerInvariant();
+
+    // Se mandarem e-mail diferente, não deixe “trocar” o dono da licença
+    if (!string.IsNullOrWhiteSpace(req.Email))
     {
-        return Results.BadRequest(new
+        var sent = req.Email!.Trim().ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(canonicalEmail) && sent != canonicalEmail)
         {
-            ok = false,
-            error = "licenseKey inválida ou não encontrada.",
-            licenseKey = req.LicenseKey
-        });
+            // Você pode apenas logar e ignorar, ou retornar erro. Aqui vou retornar erro:
+            return Results.Conflict(new
+            {
+                ok = false,
+                error = "email_mismatch",
+                message = "O e-mail enviado não corresponde ao e-mail da licença.",
+                expectedEmail = canonicalEmail
+            });
+        }
     }
+
+    // (opcional) registrar ativação dessa máquina
+    try
+    {
+        await repo.RecordActivationAsync(lic.Payload.Email ?? "", req.LicenseKey!, req.Fingerprint, "active");
+    }
+    catch { /* não derruba a ativação */ }
+
+    var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
+             !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
 
     return Results.Ok(new
     {
-        ok = true,
-        payload = lic.Payload
+        ok,
+        subscriptionStatus = lic.Payload.SubscriptionStatus,
+        expiresAtUtc = lic.Payload.ExpiresAtUtc,
+        email = canonicalEmail,
+        fingerprint = req.Fingerprint
     });
 });
+
 
 // ===== API: STATUS (stub para POC) =====
 app.MapPost("/api/status", (StatusRequest req) =>
