@@ -18,7 +18,13 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         /// <summary>
     /// Registra uma ativação/“ping” do cliente para auditoria.
     /// </summary>
-    Task RecordActivationAsync(string email, string licenseKey, string? fingerprint, string status);
+    // InMemoryRepo.cs  (adicione dentro da classe)
+public Task RecordActivationAsync(string email, string licenseKey, string? fingerprint, string status)
+{
+    // Ambiente de DEV: não precisamos persistir nada.
+    return Task.CompletedTask;
+}
+
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
