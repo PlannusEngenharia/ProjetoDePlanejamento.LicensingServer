@@ -114,8 +114,8 @@ app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.Licensin
 app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
-// ===== API: ATIVAR (gera/renova licença e assina payload) =====
-// ===== API: ATIVAR (somente ativa; não cria) =====
+
+// ===== API: ATIVAR (somente vincula a máquina; não cria licença) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
@@ -125,32 +125,12 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
     if (lic is null)
         return Results.NotFound(new { ok = false, error = "license_not_found" });
 
-    // e-mail canônico é o que está no servidor
-    var canonicalEmail = lic.Payload.Email?.Trim().ToLowerInvariant();
-
-    // Se mandarem e-mail diferente, não deixe “trocar” o dono da licença
-    if (!string.IsNullOrWhiteSpace(req.Email))
+    // Ativação independe de e-mail: só amarra licenseKey -> fingerprint
+    if (!string.IsNullOrWhiteSpace(req.Fingerprint))
     {
-        var sent = req.Email!.Trim().ToLowerInvariant();
-        if (!string.IsNullOrWhiteSpace(canonicalEmail) && sent != canonicalEmail)
-        {
-            // Você pode apenas logar e ignorar, ou retornar erro. Aqui vou retornar erro:
-            return Results.Conflict(new
-            {
-                ok = false,
-                error = "email_mismatch",
-                message = "O e-mail enviado não corresponde ao e-mail da licença.",
-                expectedEmail = canonicalEmail
-            });
-        }
+        try { await repo.RecordActivationAsync(req.LicenseKey!, req.Fingerprint!, "active"); }
+        catch { /* não derruba a ativação */ }
     }
-
-    // (opcional) registrar ativação dessa máquina
-    try
-    {
-        await repo.RecordActivationAsync(lic.Payload.Email ?? "", req.LicenseKey!, req.Fingerprint, "active");
-    }
-    catch { /* não derruba a ativação */ }
 
     var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
              !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
@@ -160,10 +140,11 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
         ok,
         subscriptionStatus = lic.Payload.SubscriptionStatus,
         expiresAtUtc = lic.Payload.ExpiresAtUtc,
-        email = canonicalEmail,
-        fingerprint = req.Fingerprint
+        email = lic.Payload.Email,        // só informativo
+        fingerprint = req.Fingerprint     // o que foi enviado pelo cliente
     });
 });
+
 
 
 // ===== API: STATUS (stub para POC) =====
@@ -404,9 +385,10 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req
 
 // === VALIDATE ===
 
+// === VALIDATE ===
 app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
 {
-    // ===== Fluxo 1: LICENÇA (se vier licenseKey, não muda sua lógica já aprovada) =====
+    // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
     if (!string.IsNullOrWhiteSpace(req.LicenseKey))
     {
         var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
@@ -416,9 +398,19 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
         var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
                  && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
 
-        // Assina (se ainda não tiver assinatura populada neste objeto)
-        // opcional: se você já assina no Issue/Renew, pode manter
-        // lic.SignatureBase64 ??= SignPayload(PrivateKeyPem, lic.Payload);
+        // >>> registra o 'ping' desta máquina para auditoria/telemetria
+        if (!string.IsNullOrWhiteSpace(req.Fingerprint))
+        {
+            try
+            {
+                await repo.RecordActivationAsync(
+                    req.LicenseKey!,
+                    req.Fingerprint!,
+                    lic.Payload.SubscriptionStatus ?? "active"
+                );
+            }
+            catch { /* silencioso: não derruba a validação */ }
+        }
 
         return Results.Ok(new
         {
@@ -437,7 +429,7 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
     // inicia (uma única vez) ou retorna o trial existente
     var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
 
-    // assina o payload, igual às licenças
+    // assina o payload para o cliente validar localmente
     trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
 
     var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
@@ -449,10 +441,11 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
         email = trial.Payload.Email,
         fingerprint = trial.Payload.Fingerprint,
 
-        // limites sugeridos para o cliente respeitar:
-        features = new[] { "rows:max:30", "print:off" } // <- não mexe nos seus models
+        // limites sugeridos para o cliente respeitar
+        features = new[] { "rows:max:30", "print:off" }
     });
 });
+
 
 
 // === DEACTIVATE ===
