@@ -26,6 +26,25 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         private readonly ConcurrentDictionary<string, SignedLicense> _byKey = new();
         private readonly ConcurrentDictionary<string, string> _keyByEmail = new();
         private readonly ConcurrentDictionary<string, SignedLicense> _trialByFp = new();
+        private readonly ConcurrentDictionary<string, string> _activations = new(); // licenseKey -> fingerprint
+
+public Task RecordActivationAsync(string licenseKey, string fingerprint, string status)
+{
+    if (string.IsNullOrWhiteSpace(licenseKey) || string.IsNullOrWhiteSpace(fingerprint))
+        return Task.CompletedTask;
+
+    _activations[licenseKey] = fingerprint;
+
+    if (_byKey.TryGetValue(licenseKey, out var lic))
+    {
+        lic.Payload.Fingerprint = fingerprint;
+        if (!string.IsNullOrWhiteSpace(status))
+            lic.Payload.SubscriptionStatus = status;
+        _byKey[licenseKey] = lic;
+    }
+    return Task.CompletedTask;
+}
+
 
         public static int TrialDays =>
             int.TryParse(Environment.GetEnvironmentVariable("TRIAL_DAYS"), out var d) && d > 0 ? d : 7;
