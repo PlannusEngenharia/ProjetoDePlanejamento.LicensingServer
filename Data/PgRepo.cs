@@ -297,35 +297,31 @@ where not exists (select 1 from upd);";
     // ======================================================
     // RECORD ACTIVATION (necessário pelo Program.cs)
     // ======================================================
-    public async Task RecordActivationAsync(string email, string licenseKey, string? fingerprint, string status)
-    {
-        await using var conn = new NpgsqlConnection(_cs);
-        await conn.OpenAsync();
+    public async Task RecordActivationAsync(string licenseKey, string fingerprint, string status)
+{
+    if (string.IsNullOrWhiteSpace(licenseKey) || string.IsNullOrWhiteSpace(fingerprint))
+        return;
 
-        // Resolve license_id pela chave
-        const string find = "select id from public.licenses where license_key = @k limit 1;";
-        int? licId = null;
-        await using (var f = new NpgsqlCommand(find, conn))
-        {
-            f.Parameters.AddWithValue("@k", licenseKey);
-            var o = await f.ExecuteScalarAsync();
-            if (o is int i) licId = i;
-        }
+    await using var conn = new NpgsqlConnection(_cs);
+    await conn.OpenAsync();
 
-        if (licId is null) return; // nada a registrar
+    const string sql = @"
+    with lic as (
+      select id from public.licenses where license_key = @k limit 1
+    )
+    insert into public.activations(license_id, fingerprint, first_seen_at, last_seen_at, status)
+    select lic.id, @fp, now(), now(), @st
+      from lic
+    on conflict (license_id, fingerprint) do update
+      set last_seen_at = now(), status = @st;";
 
-        const string upsert = @"
-            insert into public.activations (license_id, fingerprint, first_seen_at, last_seen_at, status)
-            values (@lid, @fp, now(), now(), @s)
-            on conflict (license_id, fingerprint) do update
-              set last_seen_at = now(),
-                  status = @s;";
-        await using var cmd = new NpgsqlCommand(upsert, conn);
-        cmd.Parameters.AddWithValue("@lid", licId.Value);
-        cmd.Parameters.AddWithValue("@fp", (object?)fingerprint ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@s", string.IsNullOrWhiteSpace(status) ? "active" : status);
-        await cmd.ExecuteNonQueryAsync();
-    }
+    await using var cmd = new NpgsqlCommand(sql, conn);
+    cmd.Parameters.AddWithValue("@k", licenseKey);
+    cmd.Parameters.AddWithValue("@fp", fingerprint);
+    cmd.Parameters.AddWithValue("@st", string.IsNullOrWhiteSpace(status) ? "active" : status);
+    await cmd.ExecuteNonQueryAsync();
+}
+
 
     // ======================================================
     // DOWNLOAD LOG
