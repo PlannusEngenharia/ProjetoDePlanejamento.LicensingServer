@@ -15,6 +15,10 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
         // logs (no-op no InMemory; o PgRepo grava no Postgres)
         Task LogDownloadAsync(string? ip, string? ua, string? referer);
         Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw);
+        /// <summary>
+    /// Registra uma ativação/“ping” do cliente para auditoria.
+    /// </summary>
+    Task RecordActivationAsync(string email, string licenseKey, string? fingerprint, string status);
     }
 
     public sealed class InMemoryRepo : ILicenseRepo
