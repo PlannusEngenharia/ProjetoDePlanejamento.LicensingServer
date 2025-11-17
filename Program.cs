@@ -119,30 +119,43 @@ app.MapGet("/health", () => new { ok = true });
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
-        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
+        return Results.BadRequest(new { ok = false, error = "licenseKey_obrigatorio" });
 
-    var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+    var fp = string.IsNullOrWhiteSpace(req.Fingerprint)
+        ? null
+        : req.Fingerprint.Trim();
+
+    var lic = await repo.IssueOrRenewAsync(req.LicenseKey!, req.Email, fp);
     if (lic is null)
-        return Results.NotFound(new { ok = false, error = "license_not_found" });
+        return Results.NotFound(new { ok = false, error = "license_not_found_or_canceled" });
 
-    // Ativação independe de e-mail: só amarra licenseKey -> fingerprint
-    if (!string.IsNullOrWhiteSpace(req.Fingerprint))
+    lic.Payload.Type = LicenseType.Subscription;
+    if (string.IsNullOrWhiteSpace(lic.Payload.PlanId))
+        lic.Payload.PlanId = "monthly";
+
+    if (lic.Payload.Features == null || lic.Payload.Features.Count == 0)
     {
-        try { await repo.RecordActivationAsync(req.LicenseKey!, req.Fingerprint!, "active"); }
-        catch { /* não derruba a ativação */ }
+        lic.Payload.Features = new()
+        {
+            "Import",
+            "Export",
+            "UnlimitedRows"
+        };
     }
 
-    var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
-             !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
+    lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
 
-    return Results.Ok(new
+    try
     {
-        ok,
-        subscriptionStatus = lic.Payload.SubscriptionStatus,
-        expiresAtUtc = lic.Payload.ExpiresAtUtc,
-        email = lic.Payload.Email,        // só informativo
-        fingerprint = req.Fingerprint     // o que foi enviado pelo cliente
-    });
+        if (!string.IsNullOrWhiteSpace(fp))
+            await repo.RecordActivationAsync(req.LicenseKey!, fp, "active");
+    }
+    catch
+    {
+        // log opcional
+    }
+
+    return Results.Ok(lic);
 });
 
 
@@ -163,17 +176,57 @@ app.MapPost("/api/status", (StatusRequest req) =>
 });
 
 // ===== API: CHECK (ping periódico do app cliente) =====
-app.MapPost("/api/check", (HttpRequest _) =>
+public sealed class CheckRequest
 {
-    var resp = new
+    public string? LicenseKey { get; set; }
+    public string? Fingerprint { get; set; }
+    public string? Client { get; set; }
+}
+
+app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
+{
+    var fp  = req.Fingerprint?.Trim();
+    var key = req.LicenseKey?.Trim();
+    SignedLicense? lic = null;
+
+    if (!string.IsNullOrWhiteSpace(key))
     {
-        active = true,
-        plan = "monthly",
-        nextCheckSeconds = 43200, // 12h
+        // Licença paga: só consulta
+        lic = await repo.TryGetByKeyAsync(key);
+    }
+    else if (!string.IsNullOrWhiteSpace(fp))
+    {
+        // Trial: cria/renova no Postgres
+        lic = await repo.GetOrStartTrialAsync(fp, null, InMemoryRepo.TrialDays);
+    }
+
+    var active = lic != null &&
+                 lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
+                 !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
+                               StringComparison.OrdinalIgnoreCase);
+
+    if (lic != null && !string.IsNullOrWhiteSpace(fp))
+    {
+        var licIdOrKey = !string.IsNullOrWhiteSpace(lic.Payload.LicenseId)
+            ? lic.Payload.LicenseId!
+            : (key ?? $"TRIAL-{fp}");
+
+        await repo.RecordActivationAsync(licIdOrKey, fp, lic.Payload.SubscriptionStatus ?? "trial");
+    }
+
+    var plan =
+        lic?.Payload.SubscriptionStatus == "trial" ? "trial" :
+        "subscription";
+
+    return Results.Ok(new
+    {
+        active,
+        plan,
+        nextCheckSeconds = 43200,
         token = (string?)null
-    };
-    return Results.Ok(resp);
+    });
 });
+
 
 // ===== Webhook Hotmart (v2) =====
 // ===============================================
