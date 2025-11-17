@@ -1,13 +1,12 @@
 // Program.cs
 using ProjetoDePlanejamento.LicensingServer;
 using ProjetoDePlanejamento.LicensingServer.Contracts;
+using ProjetoDePlanejamento.LicensingServer.Data;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using ProjetoDePlanejamento.LicensingServer.Data;
-
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,13 +26,11 @@ builder.Services.ConfigureHttpJsonOptions(
 builder.Services.AddCors(opt => opt.AddDefaultPolicy(p =>
     p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
 
-// ===== Repositório em memória (seed de teste) =====
-//  -> Troque pelo seu repositório real quando conectar a um DB
+// ===== Repositório (Postgres Railway ou InMemory) =====
 var cs = Environment.GetEnvironmentVariable("DATABASE_URL");
 
 if (!string.IsNullOrWhiteSpace(cs))
 {
-    // Converta a URL do Railway para uma connection string Npgsql
     var pg = BuildPgConnectionString(cs);
     builder.Services.AddSingleton<ILicenseRepo>(_ => new PgRepo(pg));
 }
@@ -42,21 +39,16 @@ else
     builder.Services.AddSingleton<ILicenseRepo>(_ => new InMemoryRepo(new[] { "TESTE-123-XYZ" }));
 }
 
-
-
 var app = builder.Build();
 app.UseCors();
 
-// Program.cs
+// ===== JSON para assinatura de payload =====
 var SigJson = new JsonSerializerOptions
 {
-    PropertyNamingPolicy = JsonNamingPolicy.CamelCase, // <-- TEM que ser camelCase
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.Never,
     WriteIndented = false
 };
-
-
-
 
 // ======================================================================
 //  CHAVE PRIVADA (use ENV em produção)
@@ -105,7 +97,7 @@ privateKeyPem = privateKeyPem
     .Replace("\r\n", "\n")
     .Trim();
 
-// ===== Throttle (opcional, simples) =====
+// ===== Throttle (se quiser usar depois) =====
 var lastHitByIp  = new ConcurrentDictionary<string, DateTime>();
 var lastHitByKey = new ConcurrentDictionary<string, DateTime>();
 
@@ -114,25 +106,28 @@ app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.Licensin
 app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
-
-// ===== API: ATIVAR (somente vincula a máquina; não cria licença) =====
+// ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { ok = false, error = "licenseKey_obrigatorio" });
 
+    // fingerprint enviada pelo cliente (LicenseService já manda isso)
     var fp = string.IsNullOrWhiteSpace(req.Fingerprint)
         ? null
         : req.Fingerprint.Trim();
 
+    // Confere/renova licença
     var lic = await repo.IssueOrRenewAsync(req.LicenseKey!, req.Email, fp);
     if (lic is null)
         return Results.NotFound(new { ok = false, error = "license_not_found_or_canceled" });
 
+    // Garante cara de assinatura mensal
     lic.Payload.Type = LicenseType.Subscription;
     if (string.IsNullOrWhiteSpace(lic.Payload.PlanId))
         lic.Payload.PlanId = "monthly";
 
+    // Features padrão (batem com FeatureGate no cliente)
     if (lic.Payload.Features == null || lic.Payload.Features.Count == 0)
     {
         lic.Payload.Features = new()
@@ -143,8 +138,10 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
         };
     }
 
+    // Assina o payload com a chave privada do servidor
     lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
 
+    // Registra ativação dessa máquina (não depende de e-mail)
     try
     {
         if (!string.IsNullOrWhiteSpace(fp))
@@ -152,15 +149,14 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
     }
     catch
     {
-        // log opcional
+        // log opcional; falha aqui não deve derrubar a ativação
     }
 
+    // Retorna SignedLicense (formato esperado pelo cliente WPF)
     return Results.Ok(lic);
 });
 
-
-
-// ===== API: STATUS (stub para POC) =====
+// ===== API: STATUS (stub) =====
 app.MapPost("/api/status", (StatusRequest req) =>
 {
     var resp = new StatusResponse
@@ -176,13 +172,6 @@ app.MapPost("/api/status", (StatusRequest req) =>
 });
 
 // ===== API: CHECK (ping periódico do app cliente) =====
-public sealed class CheckRequest
-{
-    public string? LicenseKey { get; set; }
-    public string? Fingerprint { get; set; }
-    public string? Client { get; set; }
-}
-
 app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
 {
     var fp  = req.Fingerprint?.Trim();
@@ -205,8 +194,10 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
                  !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
                                StringComparison.OrdinalIgnoreCase);
 
+    // registra/atualiza activation se tiver fingerprint
     if (lic != null && !string.IsNullOrWhiteSpace(fp))
     {
+        // usa LicenseId se existir; se não, usa a chave ou marca como TRIAL
         var licIdOrKey = !string.IsNullOrWhiteSpace(lic.Payload.LicenseId)
             ? lic.Payload.LicenseId!
             : (key ?? $"TRIAL-{fp}");
@@ -222,13 +213,11 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
     {
         active,
         plan,
-        nextCheckSeconds = 43200,
-        token = (string?)null
+        nextCheckSeconds = 43200, // 12h
+        token = (string?)null     // JWT, se quiser implementar depois
     });
 });
 
-
-// ===== Webhook Hotmart (v2) =====
 // ===============================================
 // WEBHOOK HOTMART
 // ===============================================
@@ -294,20 +283,155 @@ app.MapPost("/webhook/hotmart", async (JsonDocument body, HttpRequest req, ILice
     return Results.Ok(new { received = true, eventRaw = evt, email, appliedDays = delta.TotalDays });
 });
 
-// =============================================================
-// Helper global (fora do MapPost) — sem conflitos
-// =============================================================
-// Program.cs
-static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)
+// ===== Download trial (redireciona para o instalador do GitHub) =====
+// lê uma vez só e normaliza
+var downloadTrialUrl = (Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL")
+    ?? "https://github.com/PlannusEngenharia/ProjetoDePlanejamento.LicensingServer/releases/download/v1.0.0/PlannusSetup-1.0.0.exe")
+    .Trim();
+
+app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req, HttpContext ctx, ILicenseRepo repo) =>
 {
-    await repo.ProlongByEmailAsync(email, renewDelta); // agora cria OU atualiza
+    try
+    {
+        // log no Postgres (não pode derrubar a rota)
+        try
+        {
+            var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var ua = req.Headers["User-Agent"].ToString();
+            var referer = req.Headers["Referer"].ToString();
+            await repo.LogDownloadAsync(ip, ua, string.IsNullOrWhiteSpace(referer) ? null : referer);
+        }
+        catch { /* ignore */ }
+
+        // valida a URL vinda da env
+        if (string.IsNullOrWhiteSpace(downloadTrialUrl) ||
+            !Uri.TryCreate(downloadTrialUrl, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+        {
+            return Results.Problem("DOWNLOAD_TRIAL_URL ausente ou inválida (configure a env no Railway).", statusCode: 500);
+        }
+
+        // se mobile e GET, mostra página informativa
+        var uaLower = req.Headers["User-Agent"].ToString().ToLowerInvariant();
+        bool isMobile = uaLower.Contains("iphone") || uaLower.Contains("ipad") || uaLower.Contains("android");
+
+        if (isMobile && string.Equals(req.Method, "GET", StringComparison.OrdinalIgnoreCase))
+        {
+            var html = $"""
+            <!doctype html><meta charset="utf-8">
+            <title>Baixe no computador</title>
+            <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:680px;margin:48px auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;">
+              <h2>Baixe no seu computador Windows</h2>
+              <p>Este instalador (.exe) só funciona no Windows.<br>
+              Envie este link para seu e-mail ou abra no computador para baixar.</p>
+              <p style="margin-top:16px"><a href="{downloadTrialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
+            </div>
+            """;
+            return Results.Content(html, "text/html; charset=utf-8");
+        }
+
+        // redirect normal
+        return Results.Redirect(downloadTrialUrl, permanent: false);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Falha ao processar o download: {ex.Message}", statusCode: 500);
+    }
+});
+
+// === VALIDATE ===
+app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
+{
+    // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
+    if (!string.IsNullOrWhiteSpace(req.LicenseKey))
+    {
+        var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+        if (lic is null)
+            return Results.Ok(new { ok = false, reason = "license_not_found" });
+
+        var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
+                 && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
+
+        // registra o 'ping' desta máquina para auditoria/telemetria
+        if (!string.IsNullOrWhiteSpace(req.Fingerprint))
+        {
+            try
+            {
+                await repo.RecordActivationAsync(
+                    req.LicenseKey!,
+                    req.Fingerprint!,
+                    lic.Payload.SubscriptionStatus ?? "active"
+                );
+            }
+            catch { /* silencioso */ }
+        }
+
+        return Results.Ok(new
+        {
+            ok,
+            subscriptionStatus = lic.Payload.SubscriptionStatus,
+            expiresAtUtc = lic.Payload.ExpiresAtUtc,
+            email = lic.Payload.Email,
+            fingerprint = lic.Payload.Fingerprint
+        });
+    }
+
+    // ===== Fluxo 2: TRIAL (sem licenseKey, exige fingerprint) =====
+    if (string.IsNullOrWhiteSpace(req.Fingerprint))
+        return Results.BadRequest(new { error = "missing fingerprint for trial validation" });
+
+    // inicia (uma única vez) ou retorna o trial existente
+    var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
+
+    // assina o payload para o cliente validar localmente
+    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
+
+    var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
+    return Results.Ok(new
+    {
+        ok = trialOk,
+        subscriptionStatus = trial.Payload.SubscriptionStatus, // "trial"
+        expiresAtUtc = trial.Payload.ExpiresAtUtc,
+        email = trial.Payload.Email,
+        fingerprint = trial.Payload.Fingerprint,
+
+        // limites sugeridos para o cliente respeitar
+        features = new[] { "rows:max:30", "print:off" }
+    });
+});
+
+// === DEACTIVATE ===
+app.MapPost("/api/deactivate", async (DeactivateRequest req, ILicenseRepo repo) =>
+{
+    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
+        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
+
+    await repo.DeactivateAsync(req.LicenseKey!);
+    return Results.Ok(new { ok = true });
+});
+
+app.Run();
+
+
+// ======================================================================
+//  DECLARAÇÕES (TIPOS E HELPERS) – APENAS DEPOIS DO app.Run()
+// ======================================================================
+
+public sealed class CheckRequest
+{
+    public string? LicenseKey { get; set; }
+    public string? Fingerprint { get; set; }
+    public string? Client { get; set; }
 }
 
+// === Helpers ===
 
+static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)
+{
+    // cria ou prolonga licença vinculada ao e-mail
+    await repo.ProlongByEmailAsync(email, renewDelta);
+}
 
-
-
-// ===== Helpers =====
 static string BuildPgConnectionString(string databaseUrl)
 {
     var uri = new Uri(databaseUrl); // aceita postgres:// e postgresql://
@@ -320,16 +444,14 @@ static string BuildPgConnectionString(string databaseUrl)
         Database = uri.AbsolutePath.Trim('/'),
         Username = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "",
         Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "",
-        SslMode = Npgsql.SslMode.Require,   // Railway normalmente exige SSL
+        SslMode = Npgsql.SslMode.Require,
         Pooling = true,
-        MaxPoolSize = 20                    // <- nome correto
-        // TrustServerCertificate = true   // REMOVER: obsoleto e inútil
+        MaxPoolSize = 20
+        // TrustServerCertificate = true // removido conforme seu comentário
     };
 
     return builder.ToString();
 }
-
-
 
 static bool IsThrottled(IDictionary<string, DateTime> map, string key, TimeSpan interval)
 {
@@ -370,148 +492,3 @@ static string? TryGetByPath(JsonElement el, string path)
     }
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
-// ===== Download trial (redireciona para o instalador do GitHub) =====
-// Use uma variável de ambiente para não “fixar” a versão no código
-var trialUrl = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL")
-    ?? "https://github.com/PlannusEngenharia/ProjetoDePlanejamento.LicensingServer/releases/download/v1.0.0/PlannusSetup-1.0.0.exe";
-
-
-// ===== Download trial (redireciona para o instalador do GitHub) =====
-// ===== Download trial (redireciona para o instalador do GitHub) =====
-// pegue uma única vez e normalize; NÃO volte a declarar depois!
-var trialUrlEnvRaw = Environment.GetEnvironmentVariable("DOWNLOAD_TRIAL_URL") ?? "";
-var downloadTrialUrl = trialUrlEnvRaw.Trim();
-
-app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req, HttpContext ctx, ILicenseRepo repo) =>
-{
-    try
-    {
-        // log no Postgres (não pode derrubar a rota)
-        try
-        {
-            var ip = ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-            var ua = req.Headers["User-Agent"].ToString();
-            var referer = req.Headers["Referer"].ToString();
-            await repo.LogDownloadAsync(ip, ua, string.IsNullOrWhiteSpace(referer) ? null : referer);
-        }
-        catch { /* ignore */ }
-
-        // valida a URL vinda da env (usa a variável já declarada acima!)
-        if (string.IsNullOrWhiteSpace(downloadTrialUrl) ||
-            !Uri.TryCreate(downloadTrialUrl, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
-        {
-            return Results.Problem("DOWNLOAD_TRIAL_URL ausente ou inválida (configure a env no Railway).", statusCode: 500);
-        }
-
-        // se mobile e GET, mostra página informativa
-        var uaLower = req.Headers["User-Agent"].ToString().ToLowerInvariant();
-        bool isMobile = uaLower.Contains("iphone") || uaLower.Contains("ipad") || uaLower.Contains("android");
-
-        if (isMobile && string.Equals(req.Method, "GET", StringComparison.OrdinalIgnoreCase))
-        {
-            var html = $"""
-            <!doctype html><meta charset="utf-8">
-            <title>Baixe no computador</title>
-            <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:680px;margin:48px auto;padding:24px;border:1px solid #e5e7eb;border-radius:12px;">
-              <h2>Baixe no seu computador Windows</h2>
-              <p>Este instalador (.exe) só funciona no Windows.<br>
-              Envie este link para seu e-mail ou abra no computador para baixar.</p>
-              <p style="margin-top:16px"><a href="{downloadTrialUrl}" style="display:inline-block;padding:12px 16px;border-radius:8px;background:#2563eb;color:#fff;text-decoration:none;">Baixar instalador</a></p>
-            </div>
-            """;
-            return Results.Content(html, "text/html; charset=utf-8");
-        }
-
-        // redirect normal
-        return Results.Redirect(downloadTrialUrl, permanent: false);
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem($"Falha ao processar o download: {ex.Message}", statusCode: 500);
-    }
-});
-
-
-
-
-
-// === VALIDATE ===
-
-// === VALIDATE ===
-app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
-{
-    // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
-    if (!string.IsNullOrWhiteSpace(req.LicenseKey))
-    {
-        var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
-        if (lic is null)
-            return Results.Ok(new { ok = false, reason = "license_not_found" });
-
-        var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
-                 && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
-
-        // >>> registra o 'ping' desta máquina para auditoria/telemetria
-        if (!string.IsNullOrWhiteSpace(req.Fingerprint))
-        {
-            try
-            {
-                await repo.RecordActivationAsync(
-                    req.LicenseKey!,
-                    req.Fingerprint!,
-                    lic.Payload.SubscriptionStatus ?? "active"
-                );
-            }
-            catch { /* silencioso: não derruba a validação */ }
-        }
-
-        return Results.Ok(new
-        {
-            ok,
-            subscriptionStatus = lic.Payload.SubscriptionStatus, // "active" / "canceled"
-            expiresAtUtc = lic.Payload.ExpiresAtUtc,
-            email = lic.Payload.Email,
-            fingerprint = lic.Payload.Fingerprint
-        });
-    }
-
-    // ===== Fluxo 2: TRIAL (sem licenseKey, exige fingerprint) =====
-    if (string.IsNullOrWhiteSpace(req.Fingerprint))
-        return Results.BadRequest(new { error = "missing fingerprint for trial validation" });
-
-    // inicia (uma única vez) ou retorna o trial existente
-    var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
-
-    // assina o payload para o cliente validar localmente
-    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
-
-    var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
-    return Results.Ok(new
-    {
-        ok = trialOk,
-        subscriptionStatus = trial.Payload.SubscriptionStatus, // "trial"
-        expiresAtUtc = trial.Payload.ExpiresAtUtc,
-        email = trial.Payload.Email,
-        fingerprint = trial.Payload.Fingerprint,
-
-        // limites sugeridos para o cliente respeitar
-        features = new[] { "rows:max:30", "print:off" }
-    });
-});
-
-
-
-// === DEACTIVATE ===
-app.MapPost("/api/deactivate", async (DeactivateRequest req, ILicenseRepo repo) =>
-{
-    if (req is null || string.IsNullOrWhiteSpace(req.LicenseKey))
-        return Results.BadRequest(new { ok = false, error = "licenseKey obrigatório" });
-
-    await repo.DeactivateAsync(req.LicenseKey!);
-    return Results.Ok(new { ok = true });
-});
-
-
-
-app.Run();
-
