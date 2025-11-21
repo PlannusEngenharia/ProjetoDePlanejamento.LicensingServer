@@ -55,6 +55,80 @@ public sealed class PgRepo : ILicenseRepo
         return ToSigned(id, email, status, expiresAt, null);
     }
 
+ // ===============================
+    // Novo ajuste de computado fingerprint
+    // ===============================
+
+public async Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string licenseKey, string? fingerprint)
+{
+    await using var conn = new NpgsqlConnection(_cs);
+    await conn.OpenAsync();
+
+    // 1) Busca a licença
+    const string licSql = @"
+        select id, email, status, expires_at
+          from public.licenses
+         where license_key = @k
+         limit 1;";
+    int? licId = null;
+    string? email = null;
+    string? status = null;
+    DateTime expiresAt = DateTime.UtcNow.AddDays(-1);
+
+    await using (var cmd = new NpgsqlCommand(licSql, conn))
+    {
+        cmd.Parameters.AddWithValue("@k", licenseKey);
+        await using var rd = await cmd.ExecuteReaderAsync();
+        if (await rd.ReadAsync())
+        {
+            licId    = rd.GetInt32(0);
+            email    = rd.IsDBNull(1) ? "" : rd.GetString(1);
+            status   = rd.IsDBNull(2) ? "" : rd.GetString(2);
+            expiresAt= rd.GetDateTime(3);
+        }
+    }
+
+    if (licId is null || string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
+        return null;
+
+    // 2) Busca fingerprint já registrado
+    const string fpSql = @"
+        select fingerprint
+          from public.activations
+         where license_id = @lid
+           and status = 'active'
+         limit 1;";
+    string? existingFp = null;
+
+    await using (var fpCmd = new NpgsqlCommand(fpSql, conn))
+    {
+        fpCmd.Parameters.AddWithValue("@lid", licId.Value);
+        existingFp = await fpCmd.ExecuteScalarAsync() as string;
+    }
+
+    // 3) Se existe fingerprint diferente → BLOQUEIA
+    if (!string.IsNullOrWhiteSpace(existingFp) &&
+        !string.Equals(existingFp, fingerprint, StringComparison.OrdinalIgnoreCase))
+    {
+        return null;
+    }
+
+    // OK → retorna licença válida
+    return new SignedLicense
+    {
+        Payload = new LicensePayload
+        {
+            LicenseId          = licenseKey,
+            Email              = email ?? "",
+            SubscriptionStatus = status!,
+            ExpiresAtUtc       = DateTime.SpecifyKind(expiresAt, DateTimeKind.Utc),
+            Fingerprint        = fingerprint ?? ""
+        }
+    };
+}
+
+
+
     // ===============================
     // ISSUE / RENEW LICENSE (final)
     // ===============================
