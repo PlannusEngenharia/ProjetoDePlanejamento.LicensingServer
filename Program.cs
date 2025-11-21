@@ -107,16 +107,8 @@ app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
 // ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
+// ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
-            var existing = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, req.Fingerprint);
-if (existing == null && !string.IsNullOrWhiteSpace(req.Fingerprint))
-{
-    return Results.Ok(new {
-        ok = false,
-        reason = "license_in_use_in_other_computer"
-    });
-}
-
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { ok = false, error = "licenseKey_obrigatorio" });
@@ -126,7 +118,21 @@ if (existing == null && !string.IsNullOrWhiteSpace(req.Fingerprint))
         ? null
         : req.Fingerprint.Trim();
 
-    // Confere/renova licença
+    // 1) Se já existe essa licença ativa em OUTRO PC -> bloqueia
+    if (!string.IsNullOrWhiteSpace(fp))
+    {
+        var bound = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, fp);
+        if (bound is null)
+        {
+            return Results.Ok(new
+            {
+                ok = false,
+                reason = "license_in_use_in_other_computer"
+            });
+        }
+    }
+
+    // 2) Confere/renova licença normalmente
     var lic = await repo.IssueOrRenewAsync(req.LicenseKey!, req.Email, fp);
     if (lic is null)
         return Results.NotFound(new { ok = false, error = "license_not_found_or_canceled" });
@@ -164,6 +170,7 @@ if (existing == null && !string.IsNullOrWhiteSpace(req.Fingerprint))
     // Retorna SignedLicense (formato esperado pelo cliente WPF)
     return Results.Ok(lic);
 });
+
 
 // ===== API: STATUS (stub) =====
 app.MapPost("/api/status", (StatusRequest req) =>
@@ -209,13 +216,14 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
         lic = await repo.GetOrStartTrialAsync(fp, null, InMemoryRepo.TrialDays);
     }
 
-    var active = lic != null &&
-                 lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
-                 !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
-                               StringComparison.OrdinalIgnoreCase);
+   var active = lic != null &&
+             lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
+             !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
+                           StringComparison.OrdinalIgnoreCase);
 
-    // Apenas registra se a licença está válida E o fingerprint bate
-if (lic != null &&
+// Apenas registra se a licença está válida E o fingerprint bate
+if (active &&
+    !string.IsNullOrWhiteSpace(fp) &&
     lic.Payload.Fingerprint != null &&
     string.Equals(lic.Payload.Fingerprint, fp, StringComparison.OrdinalIgnoreCase))
 {
