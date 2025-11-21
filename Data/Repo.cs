@@ -88,6 +88,31 @@ public Task RecordActivationAsync(string licenseKey, string fingerprint, string 
         public Task<SignedLicense?> TryGetByKeyAsync(string licenseKey)
             => Task.FromResult(_byKey.TryGetValue(licenseKey, out var lic) ? lic : null);
 
+            public Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string licenseKey, string? fingerprint)
+{
+    if (!_byKey.TryGetValue(licenseKey, out var lic))
+        return Task.FromResult<SignedLicense?>(null);
+
+    // Se já tem uma ativação registrada para essa licença
+    if (_activations.TryGetValue(licenseKey, out var existingFp) &&
+        !string.IsNullOrWhiteSpace(existingFp) &&
+        !string.Equals(existingFp, fingerprint, StringComparison.OrdinalIgnoreCase))
+    {
+        // bloqueia outro computador
+        return Task.FromResult<SignedLicense?>(null);
+    }
+
+    // Se veio um fingerprint novo (ou o primeiro), grava
+    if (!string.IsNullOrWhiteSpace(fingerprint))
+    {
+        _activations[licenseKey] = fingerprint;
+        lic.Payload.Fingerprint = fingerprint;
+    }
+
+    return Task.FromResult<SignedLicense?>(lic);
+}
+
+
         public Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
         {
             if (string.IsNullOrWhiteSpace(fingerprint))
