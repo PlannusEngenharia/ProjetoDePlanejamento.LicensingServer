@@ -379,7 +379,10 @@ where not exists (select 1 from upd);";
     // ======================================================
     // RECORD ACTIVATION (necessário pelo Program.cs)
     // ======================================================
-    public async Task RecordActivationAsync(string licenseKey, string fingerprint, string status)
+   // ======================================================
+// RECORD ACTIVATION (necessário pelo Program.cs)
+// ======================================================
+public async Task RecordActivationAsync(string licenseKey, string fingerprint, string status)
 {
     if (string.IsNullOrWhiteSpace(licenseKey) || string.IsNullOrWhiteSpace(fingerprint))
         return;
@@ -387,22 +390,55 @@ where not exists (select 1 from upd);";
     await using var conn = new NpgsqlConnection(_cs);
     await conn.OpenAsync();
 
-    const string sql = @"
+    // 1) Verifica se já existe UM fingerprint ativo para essa licença
+    const string checkSql = @"
+        select a.fingerprint
+          from public.activations a
+          join public.licenses  l on l.id = a.license_id
+         where l.license_key = @k
+           and a.status      = 'active'
+         limit 1;";
+
+    string? existingFp = null;
+    await using (var chk = new NpgsqlCommand(checkSql, conn))
+    {
+        chk.Parameters.AddWithValue("@k", licenseKey);
+        var res = await chk.ExecuteScalarAsync();
+        if (res != null && res != DBNull.Value)
+            existingFp = res.ToString();
+    }
+
+    // 2) Se já existe fingerprint diferente → NÃO grava nada (mantém amarrado no PC original)
+    if (!string.IsNullOrWhiteSpace(existingFp) &&
+        !string.Equals(existingFp, fingerprint, StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine(
+            $"[RecordActivation] BLOQUEADO: license {licenseKey} já está vinculada ao FP={existingFp}, recusa novo FP={fingerprint}.");
+        return;
+    }
+
+    // 3) Se não existe (primeira vez) ou é o mesmo FP, faz o upsert normal
+    const string upsertSql = @"
     with lic as (
-      select id from public.licenses where license_key = @k limit 1
+      select id
+        from public.licenses
+       where license_key = @k
+       limit 1
     )
     insert into public.activations(license_id, fingerprint, first_seen_at, last_seen_at, status)
     select lic.id, @fp, now(), now(), @st
       from lic
     on conflict (license_id, fingerprint) do update
-      set last_seen_at = now(), status = @st;";
+      set last_seen_at = now(),
+          status       = @st;";
 
-    await using var cmd = new NpgsqlCommand(sql, conn);
-    cmd.Parameters.AddWithValue("@k", licenseKey);
+    await using var cmd = new NpgsqlCommand(upsertSql, conn);
+    cmd.Parameters.AddWithValue("@k",  licenseKey);
     cmd.Parameters.AddWithValue("@fp", fingerprint);
     cmd.Parameters.AddWithValue("@st", string.IsNullOrWhiteSpace(status) ? "active" : status);
     await cmd.ExecuteNonQueryAsync();
 }
+
 
 
     // ======================================================
