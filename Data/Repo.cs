@@ -4,7 +4,7 @@ using ProjetoDePlanejamento.LicensingServer.Contracts;
 
 namespace ProjetoDePlanejamento.LicensingServer.Data
 {
-    public interface ILicenseRepo
+   public interface ILicenseRepo
 {
     Task<SignedLicense?> IssueOrRenewAsync(string licenseKey, string? email, string? fingerprint);
     Task<SignedLicense?> TryGetByKeyAsync(string licenseKey);
@@ -12,12 +12,15 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
     Task ProlongByEmailAsync(string email, TimeSpan delta);
     Task DeactivateAsync(string licenseKey);
 
+    // >>> NOVO: usado em /api/check e /api/validate <<<
+    Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string licenseKey, string? fingerprint);
+
     Task LogDownloadAsync(string? ip, string? ua, string? referer);
     Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw);
 
-    // << simples: vínculo de ativação não usa e-mail >>
     Task RecordActivationAsync(string licenseKey, string fingerprint, string status);
 }
+
 
 
     public sealed class InMemoryRepo : ILicenseRepo
