@@ -108,6 +108,15 @@ app.MapGet("/health", () => new { ok = true });
 
 // ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
+            var existing = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, req.Fingerprint);
+if (existing == null && !string.IsNullOrWhiteSpace(req.Fingerprint))
+{
+    return Results.Ok(new {
+        ok = false,
+        reason = "license_in_use_in_other_computer"
+    });
+}
+
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { ok = false, error = "licenseKey_obrigatorio" });
@@ -205,14 +214,18 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
                  !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
                                StringComparison.OrdinalIgnoreCase);
 
-    if (lic != null && !string.IsNullOrWhiteSpace(fp))
-    {
-        var licIdOrKey = !string.IsNullOrWhiteSpace(lic.Payload.LicenseId)
-            ? lic.Payload.LicenseId!
-            : (key ?? $"TRIAL-{fp}");
+    // Apenas registra se a licença está válida E o fingerprint bate
+if (lic != null &&
+    lic.Payload.Fingerprint != null &&
+    string.Equals(lic.Payload.Fingerprint, fp, StringComparison.OrdinalIgnoreCase))
+{
+    await repo.RecordActivationAsync(
+        lic.Payload.LicenseId!,
+        fp!,
+        lic.Payload.SubscriptionStatus ?? "active"
+    );
+}
 
-        await repo.RecordActivationAsync(licIdOrKey, fp, lic.Payload.SubscriptionStatus ?? "trial");
-    }
 
     var plan =
         lic?.Payload.SubscriptionStatus == "trial" ? "trial" : "subscription";
