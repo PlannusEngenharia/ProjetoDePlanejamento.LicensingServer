@@ -178,26 +178,25 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
     var key = req.LicenseKey?.Trim();
     SignedLicense? lic = null;
 
+    // LICENÇA PAGA
     if (!string.IsNullOrWhiteSpace(key))
-{
-    lic = await repo.GetLicenseWithFingerprintCheckAsync(key, fp);
-
-    // se tentar usar em outra máquina → nega
-    if (lic is null)
     {
-        return Results.Ok(new {
-            active = false,
-            plan = "subscription",
-            nextCheckSeconds = 43200,
-            token = (string?)null,
-            error = "license_bound_to_other_machine"
-        });
-    }
-}
+        lic = await repo.GetLicenseWithFingerprintCheckAsync(key, fp);
 
+        if (lic is null)
+        {
+            return Results.Ok(new {
+                active = false,
+                plan = "subscription",
+                nextCheckSeconds = 43200,
+                token = (string?)null,
+                error = "license_bound_to_other_machine"
+            });
+        }
+    }
+    // TRIAL
     else if (!string.IsNullOrWhiteSpace(fp))
     {
-        // Trial: cria/renova no Postgres
         lic = await repo.GetOrStartTrialAsync(fp, null, InMemoryRepo.TrialDays);
     }
 
@@ -206,10 +205,8 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
                  !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
                                StringComparison.OrdinalIgnoreCase);
 
-    // registra/atualiza activation se tiver fingerprint
     if (lic != null && !string.IsNullOrWhiteSpace(fp))
     {
-        // usa LicenseId se existir; se não, usa a chave ou marca como TRIAL
         var licIdOrKey = !string.IsNullOrWhiteSpace(lic.Payload.LicenseId)
             ? lic.Payload.LicenseId!
             : (key ?? $"TRIAL-{fp}");
@@ -218,17 +215,17 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
     }
 
     var plan =
-        lic?.Payload.SubscriptionStatus == "trial" ? "trial" :
-        "subscription";
+        lic?.Payload.SubscriptionStatus == "trial" ? "trial" : "subscription";
 
     return Results.Ok(new
     {
         active,
         plan,
-        nextCheckSeconds = 43200, // 12h
-        token = (string?)null     // JWT, se quiser implementar depois
+        nextCheckSeconds = 43200,
+        token = (string?)null
     });
 });
+
 
 // ===============================================
 // WEBHOOK HOTMART
@@ -351,59 +348,22 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req
     }
 });
 
-// === VALIDATE ===
+
 // === VALIDATE ===
 app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
 {
     // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
     if (!string.IsNullOrWhiteSpace(req.LicenseKey))
     {
-        var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+        // usa o mesmo método com bloqueio de fingerprint
+        var lic = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, req.Fingerprint);
         if (lic is null)
-            return Results.Ok(new { ok = false, reason = "license_not_found" });
+        {
+            return Results.Ok(new { ok = false, reason = "license_in_use_in_other_computer" });
+        }
 
         var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
                  && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
-
-        // ============================================================
-        // BLOQUEIO – garantir que fingerprint único
-        // ============================================================
-        if (!string.IsNullOrWhiteSpace(req.Fingerprint))
-        {
-            var sql = @"
-                select fingerprint 
-                  from public.activations
-                 where license_id = (select id from public.licenses where license_key = @k limit 1)
-                   and status = 'active'
-                 limit 1;";
-
-            string? existing = null;
-
-            await using (var con = new NpgsqlConnection(
-                Environment.GetEnvironmentVariable("DATABASE_URL") ?? ""
-            ))
-            {
-                await con.OpenAsync();
-                await using var cmd = new NpgsqlCommand(sql, con);
-                cmd.Parameters.AddWithValue("@k", req.LicenseKey!);
-
-                var result = await cmd.ExecuteScalarAsync();
-                if (result != null)
-                    existing = result.ToString();
-            }
-
-            if (existing != null && existing != req.Fingerprint)
-            {
-                return Results.Ok(new {
-                    ok = false,
-                    reason = "license_in_use_in_other_computer"
-                });
-            }
-        }
-        // ============================================================
-        // FIM DO BLOQUEIO
-        // ============================================================
-
 
         // registra o 'ping' desta máquina para auditoria/telemetria
         if (!string.IsNullOrWhiteSpace(req.Fingerprint))
@@ -428,6 +388,27 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
             fingerprint = lic.Payload.Fingerprint
         });
     }
+
+    // ===== Fluxo 2: TRIAL (sem licenseKey, exige fingerprint) =====
+    if (string.IsNullOrWhiteSpace(req.Fingerprint))
+        return Results.BadRequest(new { error = "missing fingerprint for trial validation" });
+
+    var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
+
+    trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
+
+    var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
+    return Results.Ok(new
+    {
+        ok = trialOk,
+        subscriptionStatus = trial.Payload.SubscriptionStatus,
+        expiresAtUtc = trial.Payload.ExpiresAtUtc,
+        email = trial.Payload.Email,
+        fingerprint = trial.Payload.Fingerprint,
+        features = new[] { "rows:max:30", "print:off" }
+    });
+});
+
 
 
 // === DEACTIVATE ===
