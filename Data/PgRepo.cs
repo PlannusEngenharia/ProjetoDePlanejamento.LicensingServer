@@ -258,66 +258,74 @@ public async Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string lic
     // GET OR START TRIAL
     // ======================================================
     public async Task<SignedLicense> GetOrStartTrialAsync(string fingerprint, string? email, int trialDays)
+{
+    await using var conn = new NpgsqlConnection(_cs);
+    await conn.OpenAsync();
+    await using var tx = await conn.BeginTransactionAsync();
+
+    try
     {
-        await using var conn = new NpgsqlConnection(_cs);
-        await conn.OpenAsync();
-        await using var tx = await conn.BeginTransactionAsync();
+        var trialKey = $"TRIAL-{fingerprint}";
 
-        try
+        const string upLic = @"
+            insert into public.licenses (created_at, updated_at, email, license_key, status, expires_at)
+            values (
+                now(),
+                now(),
+                coalesce(@e,'trial@user'),
+                @k,
+                'trial',
+                now() + (@dias || ' days')::interval
+            )
+            on conflict (license_key) do update
+              set updated_at = now(),
+                  status     = 'trial'
+              -- ATENÇÃO: NÃO ALTERA expires_at AQUI!
+            returning id, email, status, expires_at;";
+
+        int licId; string retEmail, retStatus; DateTime retExpires;
+        await using (var cmd = new NpgsqlCommand(upLic, conn, tx))
         {
-            var trialKey = $"TRIAL-{fingerprint}";
+            cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@k", trialKey);
+            cmd.Parameters.AddWithValue("@dias", trialDays);
 
-            const string upLic = @"
-                insert into public.licenses (created_at, updated_at, email, license_key, status, expires_at)
-                values (now(), now(), coalesce(@e,'trial@user'), @k, 'trial', now() + (@dias || ' days')::interval)
-                on conflict (license_key) do update
-                  set updated_at = now(),
-                      status     = 'trial',
-                      expires_at = greatest(public.licenses.expires_at, now() + (@dias || ' days')::interval)
-                returning id, email, status, expires_at;";
+            await using var rd = await cmd.ExecuteReaderAsync();
+            if (!await rd.ReadAsync())
+                throw new InvalidOperationException("UPSERT trial não retornou linha.");
 
-            int licId; string retEmail, retStatus; DateTime retExpires;
-            await using (var cmd = new NpgsqlCommand(upLic, conn, tx))
-            {
-                cmd.Parameters.AddWithValue("@e", (object?)email ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@k", trialKey);
-                cmd.Parameters.AddWithValue("@dias", trialDays);
-
-                await using var rd = await cmd.ExecuteReaderAsync();
-                if (!await rd.ReadAsync())
-                    throw new InvalidOperationException("UPSERT trial não retornou linha.");
-
-                licId      = rd.GetInt32(0);
-                retEmail   = rd.GetString(1);
-                retStatus  = rd.GetString(2);
-                retExpires = rd.GetDateTime(3);
-            }
-
-            const string upAct = @"
-                insert into public.activations
-                    (license_id, fingerprint, first_seen_at, last_seen_at, status)
-                values
-                    (@lid, @fp, now(), now(), 'active')
-                on conflict (license_id, fingerprint) do update
-                  set last_seen_at = now(),
-                      status = 'active';";
-            await using (var cmd2 = new NpgsqlCommand(upAct, conn, tx))
-            {
-                cmd2.Parameters.AddWithValue("@lid", licId);
-                cmd2.Parameters.AddWithValue("@fp", fingerprint);
-                await cmd2.ExecuteNonQueryAsync();
-            }
-
-            await tx.CommitAsync();
-            return ToSigned(licId, retEmail, retStatus, retExpires, fingerprint);
+            licId      = rd.GetInt32(0);
+            retEmail   = rd.GetString(1);
+            retStatus  = rd.GetString(2);
+            retExpires = rd.GetDateTime(3);
         }
-        catch (Exception ex)
+
+        const string upAct = @"
+            insert into public.activations
+                (license_id, fingerprint, first_seen_at, last_seen_at, status)
+            values
+                (@lid, @fp, now(), now(), 'active')
+            on conflict (license_id, fingerprint) do update
+              set last_seen_at = now(),
+                  status = 'active';";
+        await using (var cmd2 = new NpgsqlCommand(upAct, conn, tx))
         {
-            try { await tx.RollbackAsync(); } catch { /* ignore */ }
-            Console.Error.WriteLine($"[PgRepo.GetOrStartTrialAsync] {ex}");
-            throw;
+            cmd2.Parameters.AddWithValue("@lid", licId);
+            cmd2.Parameters.AddWithValue("@fp", fingerprint);
+            await cmd2.ExecuteNonQueryAsync();
         }
+
+        await tx.CommitAsync();
+        return ToSigned(licId, retEmail, retStatus, retExpires, fingerprint);
     }
+    catch (Exception ex)
+    {
+        try { await tx.RollbackAsync(); } catch { /* ignore */ }
+        Console.Error.WriteLine($"[PgRepo.GetOrStartTrialAsync] {ex}");
+        throw;
+    }
+}
+
 
     // ======================================================
     // DEACTIVATE
