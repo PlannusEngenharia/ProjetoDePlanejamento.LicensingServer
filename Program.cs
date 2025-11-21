@@ -349,21 +349,34 @@ app.MapMethods("/download/demo", new[] { "GET", "HEAD" }, async (HttpRequest req
 });
 
 
+
 // === VALIDATE ===
 app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
 {
     // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
     if (!string.IsNullOrWhiteSpace(req.LicenseKey))
     {
-        // usa o mesmo método com bloqueio de fingerprint
-        var lic = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, req.Fingerprint);
+        // <<< AQUI é o ponto importante: usamos o método com checagem de fingerprint >>>
+        var lic = await repo.GetLicenseWithFingerprintCheckAsync(
+            req.LicenseKey!,
+            req.Fingerprint
+        );
+
         if (lic is null)
         {
-            return Results.Ok(new { ok = false, reason = "license_in_use_in_other_computer" });
+            // licença existe mas já está amarrada em outro computador
+            return Results.Ok(new
+            {
+                ok = false,
+                reason = "license_in_use_in_other_computer"
+            });
         }
 
         var ok = lic.Payload.ExpiresAtUtc > DateTime.UtcNow
-                 && !string.Equals(lic.Payload.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
+                 && !string.Equals(
+                        lic.Payload.SubscriptionStatus,
+                        "canceled",
+                        StringComparison.OrdinalIgnoreCase);
 
         // registra o 'ping' desta máquina para auditoria/telemetria
         if (!string.IsNullOrWhiteSpace(req.Fingerprint))
@@ -393,21 +406,29 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
     if (string.IsNullOrWhiteSpace(req.Fingerprint))
         return Results.BadRequest(new { error = "missing fingerprint for trial validation" });
 
-    var trial = await repo.GetOrStartTrialAsync(req.Fingerprint!, req.Email, InMemoryRepo.TrialDays);
+    // inicia (uma única vez) ou retorna o trial existente
+    var trial = await repo.GetOrStartTrialAsync(
+        req.Fingerprint!,
+        req.Email,
+        InMemoryRepo.TrialDays);
 
+    // assina o payload para o cliente validar localmente
     trial.SignatureBase64 = SignPayload(privateKeyPem, trial.Payload, SigJson);
 
     var trialOk = trial.Payload.ExpiresAtUtc > DateTime.UtcNow;
     return Results.Ok(new
     {
         ok = trialOk,
-        subscriptionStatus = trial.Payload.SubscriptionStatus,
+        subscriptionStatus = trial.Payload.SubscriptionStatus, // "trial"
         expiresAtUtc = trial.Payload.ExpiresAtUtc,
         email = trial.Payload.Email,
         fingerprint = trial.Payload.Fingerprint,
+
+        // limites sugeridos para o cliente respeitar
         features = new[] { "rows:max:30", "print:off" }
     });
 });
+
 
 
 
