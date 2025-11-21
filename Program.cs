@@ -179,10 +179,22 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
     SignedLicense? lic = null;
 
     if (!string.IsNullOrWhiteSpace(key))
+{
+    lic = await repo.GetLicenseWithFingerprintCheckAsync(key, fp);
+
+    // se tentar usar em outra máquina → nega
+    if (lic is null)
     {
-        // Licença paga: só consulta
-        lic = await repo.TryGetByKeyAsync(key);
+        return Results.Ok(new {
+            active = false,
+            plan = "subscription",
+            nextCheckSeconds = 43200,
+            token = (string?)null,
+            error = "license_bound_to_other_machine"
+        });
     }
+}
+
     else if (!string.IsNullOrWhiteSpace(fp))
     {
         // Trial: cria/renova no Postgres
@@ -345,7 +357,15 @@ app.MapPost("/api/validate", async (ValidateRequest req, ILicenseRepo repo) =>
     // ===== Fluxo 1: LICENÇA (se vier licenseKey) =====
     if (!string.IsNullOrWhiteSpace(req.LicenseKey))
     {
-        var lic = await repo.TryGetByKeyAsync(req.LicenseKey!);
+        var lic = await repo.GetLicenseWithFingerprintCheckAsync(req.LicenseKey!, req.Fingerprint);
+        if (lic is null)
+        {
+             return Results.Ok(new {
+                 ok = false,
+                reason = "license_bound_to_other_machine"
+                 });
+         }
+
         if (lic is null)
             return Results.Ok(new { ok = false, reason = "license_not_found" });
 
