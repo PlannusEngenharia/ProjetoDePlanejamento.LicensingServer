@@ -81,39 +81,44 @@ public async Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string lic
         await using var rd = await cmd.ExecuteReaderAsync();
         if (await rd.ReadAsync())
         {
-            licId    = rd.GetInt32(0);
-            email    = rd.IsDBNull(1) ? "" : rd.GetString(1);
-            status   = rd.IsDBNull(2) ? "" : rd.GetString(2);
-            expiresAt= rd.GetDateTime(3);
+            licId     = rd.GetInt32(0);
+            email     = rd.IsDBNull(1) ? "" : rd.GetString(1);
+            status    = rd.IsDBNull(2) ? "" : rd.GetString(2);
+            expiresAt = rd.GetDateTime(3);
         }
     }
 
     if (licId is null || string.Equals(status, "canceled", StringComparison.OrdinalIgnoreCase))
         return null;
 
-    // 2) Busca fingerprint já registrado
+    // 2) Verifica se já existe OUTRO fingerprint ativo diferente deste
     const string fpSql = @"
         select fingerprint
           from public.activations
          where license_id = @lid
            and status = 'active'
+           and (@fp is null or fingerprint <> @fp)
          limit 1;";
-    string? existingFp = null;
 
+    string? conflictingFp = null;
     await using (var fpCmd = new NpgsqlCommand(fpSql, conn))
     {
         fpCmd.Parameters.AddWithValue("@lid", licId.Value);
-        existingFp = await fpCmd.ExecuteScalarAsync() as string;
+        fpCmd.Parameters.AddWithValue("@fp", (object?)fingerprint ?? DBNull.Value);
+        var res = await fpCmd.ExecuteScalarAsync();
+        if (res != null && res != DBNull.Value)
+            conflictingFp = res.ToString();
     }
 
-    // 3) Se existe fingerprint diferente → BLOQUEIA
-    if (!string.IsNullOrWhiteSpace(existingFp) &&
-        !string.Equals(existingFp, fingerprint, StringComparison.OrdinalIgnoreCase))
+    // Se já tem outro FP ativo → BLOQUEIA
+    if (!string.IsNullOrWhiteSpace(conflictingFp))
     {
+        Console.Error.WriteLine(
+            $"[GetLicenseWithFingerprintCheckAsync] BLOQUEADO: license {licenseKey} já está vinculada ao FP={conflictingFp}, recusa novo FP={fingerprint}.");
         return null;
     }
 
-    // OK → retorna licença válida
+    // OK → retorna licença válida (para este mesmo FP ou primeiro uso)
     return new SignedLicense
     {
         Payload = new LicensePayload
@@ -126,6 +131,7 @@ public async Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string lic
         }
     };
 }
+
 
 
 
