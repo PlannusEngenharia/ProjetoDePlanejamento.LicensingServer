@@ -214,22 +214,7 @@ public async Task<SignedLicense?> GetLicenseWithFingerprintCheckAsync(string lic
                 expiresAt= rd.GetDateTime(3);
             }
 
-            // 5) Upsert da ativação (se tiver fingerprint)
-            if (!string.IsNullOrWhiteSpace(fingerprint))
-            {
-                const string actUpsert = @"
-                    insert into public.activations
-                        (license_id, fingerprint, first_seen_at, last_seen_at, status)
-                    values
-                        (@lid, @fp, now(), now(), 'active')
-                    on conflict (license_id, fingerprint) do update
-                      set last_seen_at = now(),
-                          status = 'active';";
-                await using var aCmd = new NpgsqlCommand(actUpsert, con, tx);
-                aCmd.Parameters.AddWithValue("@lid", licId!.Value);
-                aCmd.Parameters.AddWithValue("@fp", fingerprint!);
-                await aCmd.ExecuteNonQueryAsync();
-            }
+            
 
             await tx.CommitAsync();
 
@@ -376,9 +361,7 @@ where not exists (select 1 from upd);";
         await cmd.ExecuteNonQueryAsync();
     }
 
-    // ======================================================
-    // RECORD ACTIVATION (necessário pelo Program.cs)
-    // ======================================================
+  
    // ======================================================
 // RECORD ACTIVATION (necessário pelo Program.cs)
 // ======================================================
