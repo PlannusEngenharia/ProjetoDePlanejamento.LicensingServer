@@ -106,14 +106,15 @@ app.MapGet("/", () => new { ok = true, service = "ProjetoDePlanejamento.Licensin
 app.MapGet("/favicon.ico", () => Results.NoContent());
 app.MapGet("/health", () => new { ok = true });
 
-// ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
+
+
 // ===== API: ATIVAR (gera/renova licença e devolve SignedLicense) =====
 app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 {
     if (string.IsNullOrWhiteSpace(req.LicenseKey))
         return Results.BadRequest(new { ok = false, error = "licenseKey_obrigatorio" });
 
-    // fingerprint enviada pelo cliente (LicenseService já manda isso)
+    // fingerprint enviada pelo cliente
     var fp = string.IsNullOrWhiteSpace(req.Fingerprint)
         ? null
         : req.Fingerprint.Trim();
@@ -137,12 +138,11 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
     if (lic is null)
         return Results.NotFound(new { ok = false, error = "license_not_found_or_canceled" });
 
-    // Garante cara de assinatura mensal
+    // 3) Normaliza payload como assinatura mensal
     lic.Payload.Type = LicenseType.Subscription;
     if (string.IsNullOrWhiteSpace(lic.Payload.PlanId))
         lic.Payload.PlanId = "monthly";
 
-    // Features padrão (batem com FeatureGate no cliente)
     if (lic.Payload.Features == null || lic.Payload.Features.Count == 0)
     {
         lic.Payload.Features = new()
@@ -153,23 +153,29 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
         };
     }
 
-    // Assina o payload com a chave privada do servidor
+    // 4) Assina o payload com a chave privada
     lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
 
-    // Registra ativação dessa máquina (não depende de e-mail)
+    // 5) Registra ativação dessa máquina
     try
     {
         if (!string.IsNullOrWhiteSpace(fp))
-            await repo.RecordActivationAsync(req.LicenseKey!, fp, "active");
+        {
+            await repo.RecordActivationAsync(
+                req.LicenseKey!,
+                fp,
+                lic.Payload.SubscriptionStatus ?? "active");
+        }
     }
     catch
     {
-        // log opcional; falha aqui não deve derrubar a ativação
+        // falha de log não deve quebrar a ativação
     }
 
-    // Retorna SignedLicense (formato esperado pelo cliente WPF)
+    // 6) Retorna o SignedLicense completo (como o cliente espera)
     return Results.Ok(lic);
 });
+
 
 
 // ===== API: STATUS (stub) =====
