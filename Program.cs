@@ -153,7 +153,7 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
         };
     }
 
-    // 4) Assina o payload com a chave privada
+       // 4) Assina o payload com a chave privada
     lic.SignatureBase64 = SignPayload(privateKeyPem, lic.Payload, SigJson);
 
     // 5) Registra ativação dessa máquina
@@ -173,8 +173,14 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
     }
 
     // 6) Retorna o SignedLicense completo (como o cliente espera)
-    return Results.Ok(lic);
+    return Results.Ok(new
+    {
+        ok = true,
+        payload = lic.Payload,
+        signatureBase64 = lic.SignatureBase64
+    });
 });
+
 
 
 
