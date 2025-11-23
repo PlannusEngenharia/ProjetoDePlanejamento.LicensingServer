@@ -185,20 +185,74 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
 
 
 
-// ===== API: STATUS (stub) =====
-app.MapPost("/api/status", (StatusRequest req) =>
+
+// ===== API: STATUS =====
+app.MapPost("/api/status", async (StatusRequest req, HttpContext http, ILicenseRepo repo) =>
 {
-    var resp = new StatusResponse
+    var key = req.LicenseKey?.Trim();
+    SignedLicense? lic = null;
+
+    if (!string.IsNullOrEmpty(key))
     {
-        TrialStartedUtc = DateTime.UtcNow.AddDays(-1),
-        ExpiresAtUtc    = DateTime.UtcNow.AddDays(29),
+        // assinatura paga -> busca no Postgres
+        lic = await repo.TryGetByKeyAsync(key);
+    }
+
+    var clientIp       = http.Connection.RemoteIpAddress?.ToString();
+    var clientVersion  = req.AppVersion;
+
+    // ---------------------------
+    // CAMINHO 1: LICENÇA ENCONTRADA
+    // ---------------------------
+    if (lic is not null && lic.Payload is not null)
+    {
+        var p = lic.Payload;
+        var isActive =
+            p.ExpiresAtUtc > DateTime.UtcNow &&
+            !string.Equals(p.SubscriptionStatus, "canceled", StringComparison.OrdinalIgnoreCase);
+
+        var resp = new StatusResponse
+        {
+            TrialStartedUtc = null,
+            ExpiresAtUtc    = p.ExpiresAtUtc,
+            IsActive        = isActive,
+            CustomerName    = p.Email,
+            CustomerEmail   = p.Email,
+            Features        = p.Features ?? new List<string>()
+        };
+
+        return Results.Ok(resp);
+    }
+
+    // ---------------------------
+    // CAMINHO 2: TRIAL (SEM LICENÇA)
+    // ---------------------------
+    if (!string.IsNullOrWhiteSpace(req.Fingerprint))
+    {
+        await repo.UpsertTrialDeviceAsync(
+            req.Fingerprint.Trim(),
+            req.TrialStartedUtc,
+            req.TrialExpiresUtc,
+            clientVersion,
+            clientIp);
+    }
+
+    // resposta "genérica" de trial para o cliente
+    var trialExpires = req.TrialExpiresUtc ?? DateTime.UtcNow.AddDays(7);
+
+    var trialResp = new StatusResponse
+    {
+        TrialStartedUtc = req.TrialStartedUtc,
+        ExpiresAtUtc    = trialExpires,
         IsActive        = true,
-        CustomerName    = "Cliente Demo",
-        CustomerEmail   = "cliente@exemplo.com",
-        Features        = new() { "Import", "Export", "UnlimitedRows" }
+        CustomerName    = null,
+        CustomerEmail   = null,
+        Features        = new List<string>() // sem features especiais
     };
-    return Results.Ok(resp);
+
+    return Results.Ok(trialResp);
 });
+
 
 // ===== API: CHECK (ping periódico do app cliente) =====
 app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
