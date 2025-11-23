@@ -254,8 +254,9 @@ app.MapPost("/api/status", async (StatusRequest req, HttpContext http, ILicenseR
 });
 
 
+
 // ===== API: CHECK (ping periódico do app cliente) =====
-app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
+app.MapPost("/api/check", async (CheckRequest req, HttpContext http, ILicenseRepo repo) =>
 {
     var fp  = req.Fingerprint?.Trim();
     var key = req.LicenseKey?.Trim();
@@ -268,7 +269,8 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
 
         if (lic is null)
         {
-            return Results.Ok(new {
+            return Results.Ok(new
+            {
                 active = false,
                 plan = "subscription",
                 nextCheckSeconds = 43200,
@@ -277,33 +279,50 @@ app.MapPost("/api/check", async (CheckRequest req, ILicenseRepo repo) =>
             });
         }
     }
-    // TRIAL
+    // TRIAL (sem licenseKey, mas com fingerprint)
     else if (!string.IsNullOrWhiteSpace(fp))
     {
+        // cria/renova licença trial na tabela licenses
         lic = await repo.GetOrStartTrialAsync(fp, null, InMemoryRepo.TrialDays);
+
+        // >>> também registra na trial_devices <<<
+        try
+        {
+            await repo.UpsertTrialDeviceAsync(
+                fp,
+                lic.Payload?.IssuedAtUtc,          // início do trial
+                lic.Payload?.ExpiresAtUtc,         // fim do trial
+                req.Client,                        // versão que veio do cliente (ex: "Planner/1.0.0")
+                http.Connection.RemoteIpAddress?.ToString()
+            );
+        }
+        catch
+        {
+            // falha de log não deve quebrar o check
+        }
     }
 
-   var active = lic != null &&
-             lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
-             !string.Equals(lic.Payload.SubscriptionStatus, "canceled",
-                           StringComparison.OrdinalIgnoreCase);
+    var active = lic != null &&
+                 lic.Payload.ExpiresAtUtc > DateTime.UtcNow &&
+                 !string.Equals(
+                     lic.Payload.SubscriptionStatus,
+                     "canceled",
+                     StringComparison.OrdinalIgnoreCase);
 
-// Apenas registra se a licença está válida E o fingerprint bate
-if (active &&
-    !string.IsNullOrWhiteSpace(fp) &&
-    lic.Payload.Fingerprint != null &&
-    string.Equals(lic.Payload.Fingerprint, fp, StringComparison.OrdinalIgnoreCase))
-{
-    await repo.RecordActivationAsync(
-        lic.Payload.LicenseId!,
-        fp!,
-        lic.Payload.SubscriptionStatus ?? "active"
-    );
-}
+    // Apenas registra activations se a licença está válida E o fingerprint bate
+    if (active &&
+        !string.IsNullOrWhiteSpace(fp) &&
+        lic.Payload.Fingerprint != null &&
+        string.Equals(lic.Payload.Fingerprint, fp, StringComparison.OrdinalIgnoreCase))
+    {
+        await repo.RecordActivationAsync(
+            lic.Payload.LicenseId!,
+            fp!,
+            lic.Payload.SubscriptionStatus ?? "active"
+        );
+    }
 
-
-    var plan =
-        lic?.Payload.SubscriptionStatus == "trial" ? "trial" : "subscription";
+    var plan = lic?.Payload.SubscriptionStatus == "trial" ? "trial" : "subscription";
 
     return Results.Ok(new
     {
@@ -313,6 +332,7 @@ if (active &&
         token = (string?)null
     });
 });
+
 
 
 // ===============================================
