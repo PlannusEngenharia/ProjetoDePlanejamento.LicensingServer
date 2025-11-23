@@ -126,10 +126,11 @@ app.MapPost("/api/activate", async (ActivateRequest req, ILicenseRepo repo) =>
         if (bound is null)
         {
             return Results.Ok(new
-            {
-                ok = false,
-                reason = "license_in_use_in_other_computer"
-            });
+{
+    ok = false,
+    error = "license_in_use_in_other_computer"
+});
+
         }
     }
 
