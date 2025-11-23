@@ -10,10 +10,16 @@ namespace ProjetoDePlanejamento.LicensingServer.Contracts
 
     // /api/status (mock compat)
     public sealed class StatusRequest
-    {
-        public string? LicenseKey { get; set; }
-        public string? AppVersion { get; set; }
-    }
+{
+    public string? LicenseKey { get; set; }
+    public string? AppVersion { get; set; }
+
+    // >>> campos novos para controle de trial <<<
+    public string? Fingerprint { get; set; }
+    public DateTime? TrialStartedUtc { get; set; }
+    public DateTime? TrialExpiresUtc { get; set; }
+}
+
 
     public sealed class StatusResponse
     {
