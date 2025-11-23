@@ -474,6 +474,47 @@ where not exists (select 1 from upd);";
         await cmd.ExecuteNonQueryAsync();
     }
 
+
+        // ======================================================
+    // TRIAL DEVICES – controle comercial de demos
+    // ======================================================
+    public async Task UpsertTrialDeviceAsync(
+        string fingerprint,
+        DateTime? trialStartedUtc,
+        DateTime? trialExpiresUtc,
+        string? clientVersion,
+        string? ip)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint))
+            return;
+
+        await using var conn = new NpgsqlConnection(_cs);
+        await conn.OpenAsync();
+
+        const string sql = @"
+insert into public.trial_devices
+    (fingerprint, first_seen_at, last_seen_at, client_version, ip, trial_started_at, trial_expires_at, status)
+values
+    (@fp, now(), now(), @cv, @ip, @ts, @te, 'trial-active')
+on conflict (fingerprint) do update
+   set last_seen_at     = now(),
+       client_version   = excluded.client_version,
+       ip               = excluded.ip,
+       trial_started_at = coalesce(trial_devices.trial_started_at, excluded.trial_started_at),
+       trial_expires_at = coalesce(trial_devices.trial_expires_at, excluded.trial_expires_at),
+       status           = 'trial-active';";
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@fp", fingerprint);
+        cmd.Parameters.AddWithValue("@cv", (object?)clientVersion ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ip", (object?)ip ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ts", (object?)trialStartedUtc ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@te", (object?)trialExpiresUtc ?? DBNull.Value);
+
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+
     // ======================================================
     // DOWNLOAD LOG
     // ======================================================
