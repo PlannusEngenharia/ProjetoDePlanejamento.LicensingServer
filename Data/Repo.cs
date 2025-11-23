@@ -19,6 +19,12 @@ namespace ProjetoDePlanejamento.LicensingServer.Data
     Task LogWebhookAsync(string? evt, string? email, int appliedDays, JsonDocument raw);
 
     Task RecordActivationAsync(string licenseKey, string fingerprint, string status);
+        Task UpsertTrialDeviceAsync(
+        string fingerprint,
+        DateTime? trialStartedUtc,
+        DateTime? trialExpiresUtc,
+        string? clientVersion,
+        string? ip);
 }
 
 
