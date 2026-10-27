@@ -557,13 +557,6 @@ app.Run();
 //  DECLARAÇÕES (TIPOS E HELPERS) – APENAS DEPOIS DO app.Run()
 // ======================================================================
 
-public sealed class CheckRequest
-{
-    public string? LicenseKey { get; set; }
-    public string? Fingerprint { get; set; }
-    public string? Client { get; set; }
-}
-
 // === Helpers ===
 
 static async Task EnsureLicenseForEmailAsync(ILicenseRepo repo, string email, TimeSpan renewDelta)

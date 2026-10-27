@@ -48,6 +48,14 @@ namespace ProjetoDePlanejamento.LicensingServer.Contracts
         public string? AppVersion { get; set; }   // opcional
     }
 
+    // /api/check
+    public sealed class CheckRequest
+    {
+        public string? LicenseKey { get; set; }
+        public string? Fingerprint { get; set; }
+        public string? Client { get; set; }
+    }
+
     // /api/deactivate
     public sealed class DeactivateRequest
     {
