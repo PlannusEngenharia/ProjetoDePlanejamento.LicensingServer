@@ -627,16 +627,7 @@ static string? TryGetByPath(JsonElement el, string path)
     }
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
 }
-static string? TryGetByPath(JsonElement el, string path)
-{
-    var cur = el;
-    foreach (var seg in path.Split('.'))
-    {
-        if (!cur.TryGetProperty(seg, out var next)) return null;
-        cur = next;
-    }
-    return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
-}
+
 
 // === Tipos ===
 
