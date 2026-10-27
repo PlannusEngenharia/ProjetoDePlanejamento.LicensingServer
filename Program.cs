@@ -557,12 +557,7 @@ app.Run();
 //  DECLARAÇÕES (TIPOS E HELPERS) – APENAS DEPOIS DO app.Run()
 // ======================================================================
 
-public sealed class CheckRequest
-{
-    public string? LicenseKey { get; set; }
-    public string? Fingerprint { get; set; }
-    public string? Client { get; set; }
-}
+
 
 // === Helpers ===
 
@@ -631,4 +626,23 @@ static string? TryGetByPath(JsonElement el, string path)
         cur = next;
     }
     return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
+}
+static string? TryGetByPath(JsonElement el, string path)
+{
+    var cur = el;
+    foreach (var seg in path.Split('.'))
+    {
+        if (!cur.TryGetProperty(seg, out var next)) return null;
+        cur = next;
+    }
+    return cur.ValueKind == JsonValueKind.String ? cur.GetString() : null;
+}
+
+// === Tipos ===
+
+public sealed class CheckRequest
+{
+    public string? LicenseKey { get; set; }
+    public string? Fingerprint { get; set; }
+    public string? Client { get; set; }
 }
